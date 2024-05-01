@@ -211,7 +211,6 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
       newIds.incl(fileId.int)
     elif fileId.int notin newIds: # ids that were just added are not counted as duplicates for this
       duplicatedIds.incl(fileId.int)
-  self.connection.exec(sql"COMMIT")
 
   var checkedArchives = initHashSet[int]()
   # TODO: The performance of this is probably really bad
@@ -248,7 +247,6 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
 
   # TODO: If there are duplicate files, make sure the entire archive isn't a perfect duplicate by checking file ids
   result = self.putNewDirectoryArchive(archiveName)
-  self.connection.exec(sql"BEGIN")
   for file in files:
     discard self.putPath(result, file.id, file.normalPath)
   self.connection.exec(sql"COMMIT")
@@ -258,7 +256,7 @@ proc main =
   # These params are not used on db_sqlite module.
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  discard ctx.insertDirectoryArchive("..")
+  discard ctx.insertDirectoryArchive("/home/sir/Nim")
 
   echo "\nRows:"
   for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
