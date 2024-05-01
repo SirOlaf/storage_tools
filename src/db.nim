@@ -3,6 +3,8 @@ import std/[
   strutils,
   options,
   os,
+  sets,
+  sequtils,
 ]
 
 import db_connector/db_sqlite
@@ -46,58 +48,83 @@ proc createTables(self: DbCtx) =
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     crc32 INTEGER NOT NULL,
     sha256 TEXT NOT NULL
-  )""")
+  ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS archive_table (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     is_directory INTEGER NOT NULL
-  )""")
+  ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS path_table (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    archive_id INTEGER INTEGER NOT NULL,
+    archive_id INTEGER NOT NULL,
     file_id INTEGER NOT NULL,
     path TEXT NOT NULL,
     FOREIGN KEY (archive_id) REFERENCES archive_table(id),
     FOREIGN KEY (file_id) REFERENCES file_table (id)
-  )""")
+  ) STRICT""")
 
 
 proc initDbCtx*(path: string = ":memory:"): DbCtx =
   let conn = open(path, "", "", "")
+  conn.exec(sql"PRAGMA journal_mode = wal; PRAGMA synchronous = normal; PRAGMA temp_store = memory;")
   result = DbCtx(
     connection : conn,
   )
   result.createTables()
 
+
+proc toFileTableRow(row: Row): FileTableRow =
+  FileTableRow(
+    id : row[0].parseInt().FileId,
+    crc : row[1].parseInt().uint32,
+    sha : row[2],
+  )
+
+proc toPathTableRow(row: Row): PathTableRow =
+  PathTableRow(
+    id : row[0].parseInt().PathId,
+    archiveId : row[1].parseInt().ArchiveId,
+    fileId : row[2].parseInt().FileId,
+    path : row[3],
+  )
+
+proc toArchiveTableRow(row: Row): ArchiveTableRow =
+  ArchiveTableRow(
+    id : row[0].parseInt().ArchiveId,
+    name : row[1],
+    isDirectory : row[2].parseInt() == 1
+  )
+
+
 proc fetchCrcRows*(self: DbCtx, crc: uint32): seq[FileTableRow] =
   result = @[]
   for row in self.connection.fastRows(sql"SELECT * FROM file_table WHERE crc32 = ?", crc):
-    result.add(FileTableRow(
-      id : row[0].parseInt().FileId,
-      crc : row[1].parseInt().uint32,
-      sha : row[2],
-    ))
+    result.add(row.toFileTableRow())
+
+proc tryGetFileTableRowByHashes*(self: DbCtx, crc: uint32, sha: string): Option[FileTableRow] =
+  let x = self.connection.getRow(sql"SELECT * FROM file_table WHERE crc32 = ? AND sha256 = ?", crc, sha)
+  if x[0] == "":
+    none FileTableRow
+  else:
+    some x.toFileTableRow()
 
 proc fetchPathRowsByFileId*(self: DbCtx, fileId: FileId): seq[PathTableRow] =
   result = @[]
   for row in self.connection.fastRows(sql"SELECT * FROM path_table WHERE file_id = ?", fileId.int):
-    result.add(PathTableRow(
-      id : row[0].parseInt().PathId,
-      archiveId : row[1].parseInt().ArchiveId,
-      fileId : row[2].parseInt().FileId,
-      path : row[3],
-    ))
+    result.add(row.toPathTableRow())
 
-proc tryGetRowBySha*(rows: seq[FileTableRow], sha: string): Option[FileTableRow] =
-  result = none FileTableRow
-  for row in rows:
-    if row.sha == sha:
-      return some row
+iterator iterArchiveRows*(self: DbCtx): ArchiveTableRow =
+  for row in self.connection.rows(sql"SELECT * FROM archive_table"):
+    yield row.toArchiveTableRow()
+
+iterator iterArchivePathRows*(self: DbCtx, archiveId: ArchiveId): PathTableRow =
+  for row in self.connection.rows(sql"SELECT * FROM path_table WHERE archive_id = ?", archiveId.int):
+    yield row.toPathTableRow()
 
 proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
-  result = self.fetchCrcRows(crc).tryGetRowBySha(sha).isSome()
+  result = self.tryGetFileTableRowByHashes(crc, sha).isSome()
 
 
 # TODO: Make sure path's only use forwards slash
@@ -119,7 +146,7 @@ proc insertFileData(self: DbCtx, data: string): tuple[id: FileId, isNew: bool] =
     doInsert(crc, sha)
   else:
     # check if it's a duplicate
-    let duplicate = existingCrcRows.tryGetRowBySha(sha)
+    let duplicate = self.tryGetFileTableRowByHashes(crc, sha)
     if duplicate.isSome():
       return (
         id : duplicate.unsafeGet().id,
@@ -129,7 +156,7 @@ proc insertFileData(self: DbCtx, data: string): tuple[id: FileId, isNew: bool] =
     doInsert(crc, sha)
 
 proc putNewArchive(self: DbCtx, name: string, isDirectory: bool): ArchiveId {.inline.} =
-  self.connection.insertId(sql"INSERT INTO archive_table (name, is_directory) VALUES (?, ?)", name, isDirectory).ArchiveId
+  self.connection.insertId(sql"INSERT INTO archive_table (name, is_directory) VALUES (?, ?)", name, isDirectory.int).ArchiveId
 
 proc putNewFileArchive(self: DbCtx, name: string): ArchiveId {.inline.} =
   self.putNewArchive(name, false)
@@ -159,11 +186,14 @@ proc insertSingleFileArchive*(self: DbCtx, path: string): PathId =
   let archiveId = self.putNewFileArchive(fileName)
   self.putPath(archiveId, fileId, fileName)
 
+# TODO:
 proc insertDirectoryArchive*(self: DbCtx, path: string): ArchiveId =
   let
     baseAbsPath = path.absolutePath()
     archiveName = baseAbsPath.splitPath().tail
   var
+    newIds = initHashSet[int]()
+    duplicatedIds = initHashSet[int]()
     files = newSeq[tuple[id: FileId, normalPath: string]]()
   for p in baseAbsPath.walkDirRec():
     let normalPath = p.absolutePath().relativePath(baseAbsPath)
@@ -172,23 +202,59 @@ proc insertDirectoryArchive*(self: DbCtx, path: string): ArchiveId =
       id : fileId,
       normalPath : normalPath,
     ))
+    if isNew:
+      newIds.incl(fileId.int)
+    elif fileId.int notin newIds: # ids that were just added are not counted as duplicates for this
+      duplicatedIds.incl(fileId.int)
+
+  var checkedArchives = initHashSet[int]()
+  # TODO: The performance of this is probably really bad
+  for archive in self.iterArchiveRows():
+    if archive.id.int in checkedArchives or archive.name != archiveName:
+      # if the name isn't the same or the archive has already been checked, skip
+      continue
+    var isInteresting = false
+    for archivePathRow in self.iterArchivePathRows(archive.id):
+      if archivePathRow.fileId.int in duplicatedIds:
+        isInteresting = true
+        break
+    # added before the check to avoid doing extra work during the next iterations
+    checkedArchives.incl(archive.id.int)
+    if not isInteresting:
+      continue
+
+    let archivePathRows = self.iterArchivePathRows(archive.id).toSeq()
+    var foundAllFiles = true
+    for insertedFile in files:
+      var foundFile = false
+      for archiveFile in archivePathRows:
+        if insertedFile.id.int == archiveFile.fileId.int and insertedFile.normalPath == archiveFile.path:
+          foundFile = true
+          break
+      if not foundFile:
+        foundAllFiles = false
+        break
+    if not foundAllFiles:
+      continue
+
+    # The archive is a perfect duplicate. Return early.
+    return archive.id
 
   # TODO: If there are duplicate files, make sure the entire archive isn't a perfect duplicate by checking file ids
   result = self.putNewDirectoryArchive(archiveName)
   for file in files:
     discard self.putPath(result, file.id, file.normalPath)
 
-
 proc main =
   # user, password, database name can be empty.
   # These params are not used on db_sqlite module.
-  let ctx = initDbCtx(":memory:")
-  #discard ctx.insertSingleFileArchive("nim.cfg")
+  let ctx = initDbCtx("tests.sqlite")
+  discard ctx.insertSingleFileArchive("nim.cfg")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  discard ctx.insertDirectoryArchive(".")
+  discard ctx.insertDirectoryArchive("/home/sir/Nim")
 
   echo "\nRows:"
-  for x in ctx.connection.fastRows(sql"SELECT * FROM path_table"):
+  for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
     echo x
 
 
