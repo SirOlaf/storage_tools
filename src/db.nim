@@ -74,16 +74,14 @@ proc initDbCtx*(path: string = ":memory:"): DbCtx =
     connection : conn,
   )
   result.createTables()
-  let fileRow = result.connection.getRow(sql"SELECT * FROM sqlite_sequence WHERE name = ?", "file_table")
-  if fileRow[0] == "":
-    result.nextFileIdx = 1
-  else:
-    result.nextFileIdx = fileRow[1].parseInt() + 1
-  let pathRow = result.connection.getRow(sql"SELECT * FROM sqlite_sequence WHERE name = ?", "path_table")
-  if pathRow[0] == "":
-    result.nextPathIdx = 1
-  else:
-    result.nextPathIdx = pathRow[1].parseInt() + 1
+  template fetchTableIdx(name: string): int =
+    let row = result.connection.getRow(sql"SELECT * FROM sqlite_sequence WHERE name = ?", name)
+    if row[0] == "":
+      1
+    else:
+      row[1].parseInt() + 1
+  result.nextFileIdx = fetchTableIdx("file_table")
+  result.nextPathIdx = fetchTableIdx("path_table")
 
 
 proc toFileTableRow(row: Row): FileTableRow =
