@@ -1,0 +1,21 @@
+{
+  "items": {},
+  "nimcfg": [
+    "############# begin Atlas config section ##########",
+    "--noNimblePath",
+    "--path:\"..\"",
+    "--path:\"../crunchy/src\"",
+    "--path:\"_deps/nimsimd/src\"",
+    "############# end Atlas config section   ##########",
+    ""
+  ],
+  "nimbleFile": {
+    "filename": "",
+    "content": []
+  },
+  "hostOS": "linux",
+  "hostCPU": "amd64",
+  "nimVersion": "2.1.1 f682dabf71f35833e934a79007906f94d8d32c92",
+  "gccVersion": "13.2.1",
+  "clangVersion": ""
+}
