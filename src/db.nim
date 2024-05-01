@@ -15,6 +15,7 @@ import crunchy
 type
   DbCtx* = object
     connection: DbConn
+    nextFileIdx, nextPathIdx: int
 
   FileId* = distinct int
   ArchiveId* = distinct int
@@ -73,6 +74,16 @@ proc initDbCtx*(path: string = ":memory:"): DbCtx =
     connection : conn,
   )
   result.createTables()
+  let fileRow = result.connection.getRow(sql"SELECT * FROM sqlite_sequence WHERE name = ?", "file_table")
+  if fileRow[0] == "":
+    result.nextFileIdx = 1
+  else:
+    result.nextFileIdx = fileRow[1].parseInt() + 1
+  let pathRow = result.connection.getRow(sql"SELECT * FROM sqlite_sequence WHERE name = ?", "path_table")
+  if pathRow[0] == "":
+    result.nextPathIdx = 1
+  else:
+    result.nextPathIdx = pathRow[1].parseInt() + 1
 
 
 proc toFileTableRow(row: Row): FileTableRow =
@@ -97,11 +108,6 @@ proc toArchiveTableRow(row: Row): ArchiveTableRow =
     isDirectory : row[2].parseInt() == 1
   )
 
-
-proc fetchCrcRows*(self: DbCtx, crc: uint32): seq[FileTableRow] =
-  result = @[]
-  for row in self.connection.fastRows(sql"SELECT * FROM file_table WHERE crc32 = ?", crc):
-    result.add(row.toFileTableRow())
 
 proc tryGetFileTableRowByHashes*(self: DbCtx, crc: uint32, sha: string): Option[FileTableRow] =
   let x = self.connection.getRow(sql"SELECT * FROM file_table WHERE crc32 = ? AND sha256 = ?", crc, sha)
@@ -130,30 +136,27 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Make sure path's only use forwards slash
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
-proc insertFileData(self: DbCtx, data: string): tuple[id: FileId, isNew: bool] =
+proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
   template doInsert(crc: uint32, sha: string): untyped =
+    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256) VALUES (?, ?)", crc.int, sha)
     result = (
-      id : self.connection.insertId(sql"INSERT INTO file_table (crc32, sha256) VALUES (?, ?)", crc, sha).FileId,
+      id : self.nextFileIdx.FileId,
       isNew : true,
     )
+    inc self.nextFileIdx
 
   let
     crc = data.crc32()
     sha = data.sha256().toHex()
-    existingCrcRows = self.fetchCrcRows(crc)
-  if existingCrcRows.len() == 0:
-    # No collision or duplicate, proceed without further checks
+    existingRow = self.tryGetFileTableRowByHashes(crc, sha)
+  if existingRow.isNone():
     doInsert(crc, sha)
   else:
-    # check if it's a duplicate
-    let duplicate = self.tryGetFileTableRowByHashes(crc, sha)
-    if duplicate.isSome():
-      return (
-        id : duplicate.unsafeGet().id,
-        isNew : false,
-      )
-    # not a duplicate, insert.
-    doInsert(crc, sha)
+    return (
+      id : existingRow.unsafeGet().id,
+      isNew : false,
+    )
+
 
 proc putNewArchive(self: DbCtx, name: string, isDirectory: bool): ArchiveId {.inline.} =
   self.connection.insertId(sql"INSERT INTO archive_table (name, is_directory) VALUES (?, ?)", name, isDirectory.int).ArchiveId
@@ -164,17 +167,19 @@ proc putNewFileArchive(self: DbCtx, name: string): ArchiveId {.inline.} =
 proc putNewDirectoryArchive(self: DbCtx, name: string): ArchiveId {.inline.} =
   self.putNewArchive(name, true)
 
-proc putPath(self: DbCtx, archiveId: ArchiveId, fileId: FileId, path: string): PathId =
-  self.connection.insertId(
+proc putPath(self: var DbCtx, archiveId: ArchiveId, fileId: FileId, path: string): PathId =
+  result = self.nextPathIdx.PathId
+  self.connection.exec(
     sql"INSERT INTO path_table (archive_id, file_id, path) VALUES (?, ?, ?)",
     archiveId.int,
     fileId.int,
     path,
-  ).PathId
+  )
+  inc self.nextPathIdx
 
 
 # Returns a PathId because the archive id is internal for single files
-proc insertSingleFileArchive*(self: DbCtx, path: string): PathId =
+proc insertSingleFileArchive*(self: var DbCtx, path: string): PathId =
   let
     fileName = path.splitPath().tail
     (fileId, isNew) = self.insertFileData(readFile(path))
@@ -186,15 +191,15 @@ proc insertSingleFileArchive*(self: DbCtx, path: string): PathId =
   let archiveId = self.putNewFileArchive(fileName)
   self.putPath(archiveId, fileId, fileName)
 
-# TODO:
-proc insertDirectoryArchive*(self: DbCtx, path: string): ArchiveId =
+proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
   let
-    baseAbsPath = path.absolutePath()
+    baseAbsPath = path.absolutePath().strip(chars={'/'}, leading=false, trailing=true)
     archiveName = baseAbsPath.splitPath().tail
   var
     newIds = initHashSet[int]()
     duplicatedIds = initHashSet[int]()
     files = newSeq[tuple[id: FileId, normalPath: string]]()
+  self.connection.exec(sql"BEGIN")
   for p in baseAbsPath.walkDirRec():
     let normalPath = p.absolutePath().relativePath(baseAbsPath)
     let (fileId, isNew) = self.insertFileData(readFile(p))
@@ -206,6 +211,7 @@ proc insertDirectoryArchive*(self: DbCtx, path: string): ArchiveId =
       newIds.incl(fileId.int)
     elif fileId.int notin newIds: # ids that were just added are not counted as duplicates for this
       duplicatedIds.incl(fileId.int)
+  self.connection.exec(sql"COMMIT")
 
   var checkedArchives = initHashSet[int]()
   # TODO: The performance of this is probably really bad
@@ -242,16 +248,17 @@ proc insertDirectoryArchive*(self: DbCtx, path: string): ArchiveId =
 
   # TODO: If there are duplicate files, make sure the entire archive isn't a perfect duplicate by checking file ids
   result = self.putNewDirectoryArchive(archiveName)
+  self.connection.exec(sql"BEGIN")
   for file in files:
     discard self.putPath(result, file.id, file.normalPath)
+  self.connection.exec(sql"COMMIT")
 
 proc main =
   # user, password, database name can be empty.
   # These params are not used on db_sqlite module.
-  let ctx = initDbCtx("tests.sqlite")
-  discard ctx.insertSingleFileArchive("nim.cfg")
+  var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  discard ctx.insertDirectoryArchive("/home/sir/Nim")
+  discard ctx.insertDirectoryArchive("..")
 
   echo "\nRows:"
   for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
