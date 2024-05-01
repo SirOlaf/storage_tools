@@ -133,7 +133,7 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
   result = self.tryGetFileTableRowByHashes(crc, sha).isSome()
 
 
-# TODO: Make sure path's only use forwards slash
+# TODO: Make sure paths only use forwards slash
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
 proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
@@ -149,6 +149,7 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     crc = data.crc32()
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
+  #writeFile("store/" & sha, data)
   if existingRow.isNone():
     doInsert(crc, sha)
   else:
@@ -245,15 +246,12 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
     # The archive is a perfect duplicate. Return early.
     return archive.id
 
-  # TODO: If there are duplicate files, make sure the entire archive isn't a perfect duplicate by checking file ids
   result = self.putNewDirectoryArchive(archiveName)
   for file in files:
     discard self.putPath(result, file.id, file.normalPath)
   self.connection.exec(sql"COMMIT")
 
 proc main =
-  # user, password, database name can be empty.
-  # These params are not used on db_sqlite module.
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
   discard ctx.insertDirectoryArchive("/home/sir/Nim")
