@@ -5,6 +5,7 @@ import std/[
   os,
   sets,
   sequtils,
+  times,
 ]
 
 import db_connector/db_sqlite
@@ -26,11 +27,13 @@ type
     id*: FileId
     crc*: uint32
     sha*: string
+    timestamp*: int
 
   ArchiveTableRow* = object
     id*: ArchiveId
     name*: string
     isDirectory*: bool
+    timestamp*: int
 
   PathTableRow* = object
     id*: PathId
@@ -44,18 +47,23 @@ proc `=destroy`*(self: var DbCtx) =
   self.connection.close()
 
 
+proc getTimestamp(): int = now().utc().toTime().toUnix()
+
+
 proc createTables(self: DbCtx) =
-  # TODO: File metadata; size as bare minimum
+  # TODO: File metadata; size as bare minimum in addition to timestamp
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS file_table (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     crc32 INTEGER NOT NULL,
-    sha256 TEXT NOT NULL
+    sha256 TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
   ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS archive_table (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
-    is_directory INTEGER NOT NULL
+    is_directory INTEGER NOT NULL,
+    timestamp INTEGER NOT NULL
   ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS path_table (
@@ -91,6 +99,7 @@ proc toFileTableRow(row: Row): FileTableRow =
     id : row[0].parseInt().FileId,
     crc : row[1].parseInt().uint32,
     sha : row[2],
+    timestamp : row[3].parseInt(),
   )
 
 proc toPathTableRow(row: Row): PathTableRow =
@@ -105,7 +114,8 @@ proc toArchiveTableRow(row: Row): ArchiveTableRow =
   ArchiveTableRow(
     id : row[0].parseInt().ArchiveId,
     name : row[1],
-    isDirectory : row[2].parseInt() == 1
+    isDirectory : row[2].parseInt() == 1,
+    timestamp : row[3].parseInt(),
   )
 
 
@@ -142,7 +152,7 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Error correction codes
 proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
   template doInsert(crc: uint32, sha: string): untyped =
-    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256) VALUES (?, ?)", crc.int, sha)
+    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp) VALUES (?, ?, ?)", crc.int, sha, getTimestamp())
     result = (
       id : self.nextFileIdx.FileId,
       isNew : true,
@@ -167,7 +177,7 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
 
 
 proc putNewArchive(self: DbCtx, name: string, isDirectory: bool): ArchiveId {.inline.} =
-  self.connection.insertId(sql"INSERT INTO archive_table (name, is_directory) VALUES (?, ?)", name, isDirectory.int).ArchiveId
+  self.connection.insertId(sql"INSERT INTO archive_table (name, is_directory, timestamp) VALUES (?, ?, ?)", name, isDirectory.int, getTimestamp()).ArchiveId
 
 proc putNewFileArchive(self: DbCtx, name: string): ArchiveId {.inline.} =
   self.putNewArchive(name, false)
@@ -281,13 +291,14 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
 proc main =
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  discard ctx.insertDirectoryArchive("/home/sir/Nim")
+  #discard ctx.insertDirectoryArchive("/home/sir/Nim")
 
   #ctx.restoreArchive(1.ArchiveId, "./out")
 
   echo "\nRows:"
   for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
     echo x
+    echo x[3].parseInt().fromUnix()
 
 
 main()
