@@ -194,10 +194,10 @@ proc insertSingleFileArchive*(self: var DbCtx, path: string): PathId =
   let archiveId = self.putNewFileArchive(fileName)
   self.putPath(archiveId, fileId, fileName)
 
-proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
+proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string): ArchiveId =
   let
     baseAbsPath = path.absolutePath().strip(chars={'/'}, leading=false, trailing=true)
-    archiveName = baseAbsPath.splitPath().tail
+    archiveName = name.get(baseAbsPath.splitPath().tail)
   var
     newIds = initHashSet[int]()
     duplicatedIds = initHashSet[int]()
