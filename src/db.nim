@@ -253,7 +253,7 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string):
     discard self.putPath(result, file.id, file.normalPath)
   self.connection.exec(sql"COMMIT")
 
-proc restoreBaseArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
+proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
   let basePath = targetPath.absolutePath()
   if dirExists(basePath):
     removeDir(basePath)
@@ -275,7 +275,7 @@ proc main =
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
   #discard ctx.insertDirectoryArchive("./test")
 
-  ctx.restoreBaseArchive(2.ArchiveId, "./out")
+  #ctx.restoreArchive(2.ArchiveId, "./out")
 
   #echo "\nRows:"
   #for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
