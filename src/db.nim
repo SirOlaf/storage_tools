@@ -10,6 +10,7 @@ import std/[
 import db_connector/db_sqlite
 
 import crunchy
+import zstd/[compress, decompress]
 
 
 type
@@ -68,6 +69,7 @@ proc createTables(self: DbCtx) =
 
 
 proc initDbCtx*(path: string = ":memory:"): DbCtx =
+  createDir("store")
   let conn = open(path, "", "", "")
   conn.exec(sql"PRAGMA journal_mode = wal; PRAGMA synchronous = normal; PRAGMA temp_store = memory;")
   result = DbCtx(
@@ -151,7 +153,10 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     crc = data.crc32()
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
-  writeFile("store/" & sha, data)
+  if data.len() > 0:
+    writeFile("store/" & sha, compress(data))
+  else:
+    writeFile("store/" & sha, data)
   if existingRow.isNone():
     doInsert(crc, sha)
   else:
@@ -267,19 +272,22 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
       contents = readFile("store/".joinPath(fileRow.sha))
     if pathHead != "":
       createDir(basePath.joinPath(pathHead))
-    writeFile(fullpath, contents)
+    if contents.len() > 0:
+      writeFile(fullPath, decompress(contents))
+    else:
+      writeFile(fullPath, contents)
 
 
 proc main =
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  #discard ctx.insertDirectoryArchive("./test")
+  discard ctx.insertDirectoryArchive("/home/sir/Nim")
 
-  #ctx.restoreArchive(2.ArchiveId, "./out")
+  #ctx.restoreArchive(1.ArchiveId, "./out")
 
-  #echo "\nRows:"
-  #for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
-  #  echo x
+  echo "\nRows:"
+  for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
+    echo x
 
 
 main()

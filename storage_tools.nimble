@@ -14,3 +14,4 @@ requires "nim >= 2.1.1"
 
 requires "crunchy >= 0.1.11"
 requires "db_connector >= 0.1.0"
+requires "zstd >= 0.9.0"
