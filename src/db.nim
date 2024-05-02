@@ -119,6 +119,10 @@ proc fetchPathRowsByFileId*(self: DbCtx, fileId: FileId): seq[PathTableRow] =
   for row in self.connection.fastRows(sql"SELECT * FROM path_table WHERE file_id = ?", fileId.int):
     result.add(row.toPathTableRow())
 
+proc fetchFileByFileId*(self: DbCtx, fileId: FileId): FileTableRow =
+  let row = self.connection.getRow(sql"SELECT * FROM file_table WHERE id = ?", fileId.int)
+  row.toFileTableRow()
+
 iterator iterArchiveRows*(self: DbCtx): ArchiveTableRow =
   for row in self.connection.rows(sql"SELECT * FROM archive_table"):
     yield row.toArchiveTableRow()
@@ -147,7 +151,7 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     crc = data.crc32()
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
-  #writeFile("store/" & sha, data)
+  writeFile("store/" & sha, data)
   if existingRow.isNone():
     doInsert(crc, sha)
   else:
@@ -249,14 +253,33 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string): ArchiveId =
     discard self.putPath(result, file.id, file.normalPath)
   self.connection.exec(sql"COMMIT")
 
+proc restoreBaseArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
+  let basePath = targetPath.absolutePath()
+  if dirExists(basePath):
+    removeDir(basePath)
+  createDir(basePath)
+  for pathRow in self.iterArchivePathRows(archiveId):
+    let
+      fullPath = basePath.joinPath(pathRow.path)
+      relPath = fullPath.relativePath(basePath)
+      pathHead = relPath.splitPath().head
+      fileRow = self.fetchFileByFileId(pathRow.fileId)
+      contents = readFile("store/".joinPath(fileRow.sha))
+    if pathHead != "":
+      createDir(basePath.joinPath(pathHead))
+    writeFile(fullpath, contents)
+
+
 proc main =
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  discard ctx.insertDirectoryArchive("/home/sir/Nim")
+  #discard ctx.insertDirectoryArchive("./test")
 
-  echo "\nRows:"
-  for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
-    echo x
+  ctx.restoreBaseArchive(2.ArchiveId, "./out")
+
+  #echo "\nRows:"
+  #for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
+  #  echo x
 
 
 main()
