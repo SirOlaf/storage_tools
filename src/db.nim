@@ -18,6 +18,8 @@ type
   DbCtx* = object
     connection: DbConn
     nextFileIdx, nextPathIdx: int
+    # TODO: Figure out what might be needed to derive keys
+    cbEncrypt, cbDecrypt: proc(data: string, archiveRow: ArchiveTableRow, pathRow: PathTableRow, fileRow: FileTableRow): string {.closure.}
 
   FileId* = distinct int
   ArchiveId* = distinct int
@@ -28,6 +30,7 @@ type
     crc*: uint32
     sha*: string
     timestamp*: int
+    isCompressed*: bool
 
   ArchiveTableRow* = object
     id*: ArchiveId
@@ -40,6 +43,10 @@ type
     archiveId*: ArchiveId
     fileId*: FileId
     path*: string
+
+proc `$`*(x: FileId): string {.borrow.}
+proc `$`*(x: ArchiveId): string {.borrow.}
+proc `$`*(x: PathId): string {.borrow.}
 
 
 proc `=copy`*(self: var DbCtx; other: DbCtx) {.error.}
@@ -56,7 +63,8 @@ proc createTables(self: DbCtx) =
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     crc32 INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
+    timestamp INTEGER NOT NULL,
+    is_compressed INTEGER NOT NULL
   ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS archive_table (
@@ -100,6 +108,7 @@ proc toFileTableRow(row: Row): FileTableRow =
     crc : row[1].parseInt().uint32,
     sha : row[2],
     timestamp : row[3].parseInt(),
+    isCompressed : row[4].parseInt() == 1,
   )
 
 proc toPathTableRow(row: Row): PathTableRow =
@@ -151,8 +160,8 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
 proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
-  template doInsert(crc: uint32, sha: string): untyped =
-    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp) VALUES (?, ?, ?)", crc.int, sha, getTimestamp())
+  template doInsert(crc: uint32, sha: string, isCompressed: bool): untyped =
+    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp, is_compressed) VALUES (?, ?, ?, ?)", crc.int, sha, getTimestamp(), isCompressed.int)
     result = (
       id : self.nextFileIdx.FileId,
       isNew : true,
@@ -163,12 +172,22 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     crc = data.crc32()
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
-  if data.len() > 0:
-    writeFile("store/" & sha, compress(data))
-  else:
+
+  template writeStore(data: seq[byte] or string, compressed: bool) =
     writeFile("store/" & sha, data)
+    doInsert(crc, sha, isCompressed=compressed)
+
+  # TODO: Maybe calculate entropy as a preliminary step
+  # TODO: Does not compressing have a relevant impact on encryption here?
   if existingRow.isNone():
-    doInsert(crc, sha)
+    if data.len() > 0:
+      let compressedData = compress(data)
+      if compressedData.len() < data.len():
+        writeStore(compressedData, compressed=true)
+      else:
+        writeStore(data, compressed=false)
+    else:
+      writeStore(data, compressed=false)
   else:
     return (
       id : existingRow.unsafeGet().id,
@@ -282,7 +301,7 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
       contents = readFile("store/".joinPath(fileRow.sha))
     if pathHead != "":
       createDir(basePath.joinPath(pathHead))
-    if contents.len() > 0:
+    if fileRow.isCompressed:
       writeFile(fullPath, decompress(contents))
     else:
       writeFile(fullPath, contents)
@@ -291,14 +310,12 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
 proc main =
   var ctx = initDbCtx("tests.sqlite")
   #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  #discard ctx.insertDirectoryArchive("/home/sir/Nim")
+  #discard ctx.insertDirectoryArchive("./code")
 
   #ctx.restoreArchive(1.ArchiveId, "./out")
 
-  echo "\nRows:"
-  for x in ctx.connection.fastRows(sql"SELECT * FROM archive_table"):
-    echo x
-    echo x[3].parseInt().fromUnix()
-
+  echo "\Archives:"
+  for row in ctx.iterArchiveRows():
+    echo row
 
 main()

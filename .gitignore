@@ -3,5 +3,6 @@
 !*.*
 
 _deps
+store
 *.sqlite*
 *.idx
