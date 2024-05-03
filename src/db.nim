@@ -13,13 +13,21 @@ import db_connector/db_sqlite
 import crunchy
 import zstd/[compress, decompress]
 
+import sodium/sodium_internal
+
+
+const DbContextName = ['F', 'i', 'l', 'e', 't', 'o', 'o', 'l']
+static:
+  doAssert DbContextName.len() == 8
+
 
 type
   DbCtx* = object
     connection: DbConn
     nextFileIdx, nextPathIdx: int
-    # TODO: Figure out what might be needed to derive keys
-    cbEncrypt, cbDecrypt: proc(data: string, archiveRow: ArchiveTableRow, pathRow: PathTableRow, fileRow: FileTableRow): string {.closure.}
+    masterKey: CryptoKey
+
+  CryptoKey* = array[32, byte]
 
   FileId* = distinct int
   ArchiveId* = distinct int
@@ -84,12 +92,13 @@ proc createTables(self: DbCtx) =
   ) STRICT""")
 
 
-proc initDbCtx*(path: string = ":memory:"): DbCtx =
+proc initDbCtx*(path: string = ":memory:", masterKey: CryptoKey): DbCtx =
   createDir("store")
   let conn = open(path, "", "", "")
   conn.exec(sql"PRAGMA journal_mode = wal; PRAGMA synchronous = normal; PRAGMA temp_store = memory;")
   result = DbCtx(
     connection : conn,
+    masterKey : masterKey,
   )
   result.createTables()
   template fetchTableIdx(name: string): int =
@@ -156,6 +165,77 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
   result = self.tryGetFileTableRowByHashes(crc, sha).isSome()
 
 
+proc deriveKeyForFile(self: DbCtx, fileId: FileId): CryptoKey =
+  doAssert crypto_secretstream_xchacha20poly1305_KEYBYTES() == crypto_kdf_keybytes_proc()
+  result = default(Cryptokey)
+  let subkeyId = fileId.uint64
+  doAssert crypto_kdf_derive_from_key(
+    cast[ptr byte](addr result[0]),
+    result.len().csize_t,
+    subkeyId,
+    cast[array[8, cschar]](DbContextName),
+    self.masterKey
+  ) == 0
+
+proc encryptFileData(self: DbCtx, fileId: FileId, data: openArray[byte]): seq[byte] =
+  if data.len() == 0:
+    return @[]
+  let key = self.deriveKeyForFile(fileId)
+  var
+    state = default(crypto_secretstream_xchacha20poly1305_state)
+    header = default(array[24, byte])
+  doAssert crypto_secretstream_xchacha20poly1305_init_push(
+    addr state,
+    header,
+    key,
+  ) == 0
+  result = newSeq[byte](crypto_secretstream_xchacha20poly1305_ABYTES().int + header.len() + data.len())
+  copyMem(addr result[0], addr header[0], header.len())
+  var outLen = 0.culonglong
+  doAssert crypto_secretstream_xchacha20poly1305_push(
+    addr state,
+    addr result[header.len()],
+    addr outLen,
+    cast[ptr byte](addr data[0]),
+    data.len().culonglong,
+    nil,
+    0,
+    crypto_secretstream_xchacha20poly1305_TAG_FINAL(),
+  ) == 0
+
+
+proc decryptFileData(self: DbCtx, fileId: FileId, data: openArray[byte]): seq[byte] =
+  if data.len() == 0:
+    return @[]
+  let key = self.deriveKeyForFile(fileId)
+  var
+    header = default(array[24, byte])
+    state = default(crypto_secretstream_xchacha20poly1305_state)
+  copyMem(addr header[0], addr data[0], header.len())
+  doAssert crypto_secretstream_xchacha20poly1305_init_pull(
+    addr state,
+    header,
+    key,
+  ) == 0
+
+  result = newSeq[byte](data.len() - header.len() - crypto_secretstream_xchacha20poly1305_ABYTES().int)
+  var
+    tag = 0u8
+    outLen = 0.culonglong
+  doAssert crypto_secretstream_xchacha20poly1305_pull(
+    addr state,
+    addr result[0],
+    addr outLen,
+    addr tag,
+    cast[ptr byte](addr data[header.len()]),
+    (data.len() - header.len()).culonglong,
+    nil,
+    0
+  ) == 0
+  doAssert tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL()
+  doAssert outLen.int == result.len()
+
+
 # TODO: Make sure paths only use forwards slash
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
@@ -173,12 +253,25 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
 
-  template writeStore(data: seq[byte] or string, compressed: bool) =
-    writeFile("store/" & sha, data)
+  template writeStore(data: seq[byte] | string, compressed: bool) =
+    if data.len() > 0:
+      writeFile(
+        "store/" & sha,
+        self.encryptFileData(
+          self.nextFileIdx.FileId,
+          (
+            when data is string:
+              data.toOpenArrayByte(0, data.len() - 1)
+            else:
+              data.toOpenArray(0, data.len() - 1)
+          ),
+        )
+      )
+    else:
+      writeFile("store/" & sha, data)
     doInsert(crc, sha, isCompressed=compressed)
 
   # TODO: Maybe calculate entropy as a preliminary step
-  # TODO: Does not compressing have a relevant impact on encryption here?
   if existingRow.isNone():
     if data.len() > 0:
       let compressedData = compress(data)
@@ -298,24 +391,57 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
       relPath = fullPath.relativePath(basePath)
       pathHead = relPath.splitPath().head
       fileRow = self.fetchFileByFileId(pathRow.fileId)
-      contents = readFile("store/".joinPath(fileRow.sha))
+      contents = block:
+        let tmp = readFile("store/".joinPath(fileRow.sha))
+        self.decryptFileData(fileRow.id, tmp.toOpenArrayByte(0, tmp.len() - 1))
+
     if pathHead != "":
       createDir(basePath.joinPath(pathHead))
     if fileRow.isCompressed:
       writeFile(fullPath, decompress(contents))
     else:
-      writeFile(fullPath, contents)
+      if contents.len() > 0:
+        writeFile(fullPath, contents)
+      else:
+        writeFile(fullPath, "")
+
+when isMainModule:
+  import std/[
+    terminal,
+  ]
+
+  proc main =
+    # TODO: Init db with a password and validate it with subsequent launches
+    let masterKey = block:
+      let password = readPasswordFromStdin()
+      # TODO: Generate a salt and store it somewhere with the database
+      let saltBuf = "BFC4305C5DA424DEADBB50C09462207B".parseHexStr()
+
+      if password.len() < crypto_pwhash_passwd_min_proc().int:
+        echo "Password too short. Must be at least: " & $crypto_pwhash_passwd_min_proc()
+        quit(1)
+      var masterKeyBuf = default(CryptoKey)
+      doAssert crypto_pwhash(
+        cast[ptr byte](addr masterKeyBuf[0]),
+        masterKeyBuf.len().culonglong,
+        password.cstring,
+        password.len().culonglong,
+        cast[ptr byte](addr saltBuf[0]),
+        crypto_pwhash_opslimit_moderate_proc(),
+        crypto_pwhash_memlimit_moderate_proc(),
+        crypto_pwhash_alg_argon2id13_proc()
+      ) == 0
+      masterKeyBuf
 
 
-proc main =
-  var ctx = initDbCtx("tests.sqlite")
-  #discard ctx.insertSingleFileArchive("nim copy.cfg")
-  #discard ctx.insertDirectoryArchive("./code")
+    var ctx = initDbCtx("tests.sqlite", masterKey)
+    #discard ctx.insertSingleFileArchive("nim copy.cfg")
+    #discard ctx.insertDirectoryArchive("test")
 
-  #ctx.restoreArchive(1.ArchiveId, "./out")
+    ctx.restoreArchive(1.ArchiveId, "./out")
 
-  echo "Archives:"
-  for row in ctx.iterArchiveRows():
-    echo row
+    echo "Archives:"
+    for row in ctx.iterArchiveRows():
+      echo row
 
-main()
+  main()
