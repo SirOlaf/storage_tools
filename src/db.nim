@@ -314,7 +314,7 @@ proc main =
 
   #ctx.restoreArchive(1.ArchiveId, "./out")
 
-  echo "\Archives:"
+  echo "Archives:"
   for row in ctx.iterArchiveRows():
     echo row
 
