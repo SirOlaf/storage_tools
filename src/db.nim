@@ -393,16 +393,27 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
 
 when isMainModule:
   proc main =
-    # TODO: Init db with a password and validate it with subsequent launches
-    var ctx = initDbCtx("tests.sqlite")
-    #discard ctx.insertSingleFileArchive("nim copy.cfg")
-    #discard ctx.insertDirectoryArchive("test")
+    template makeCtx: untyped =
+      var ctx {.inject.} = initDbCtx("db.sqlite")
 
-    ctx.restoreArchive(1.ArchiveId, "./out")
-    echo "restored"
-
-    echo "Archives:"
-    for row in ctx.iterArchiveRows():
-      echo row
+    let paramMode = paramStr(1)
+    if paramMode == "i":
+      let insertPath = paramStr(2)
+      makeCtx()
+      discard ctx.insertDirectoryArchive(insertPath)
+      echo "Inserted"
+    elif paramMode == "r":
+      let
+        restorePath = paramStr(2)
+        archiveId = paramStr(3).parseInt()
+      makeCtx()
+      ctx.restoreArchive(archiveId.ArchiveId, restorePath)
+      echo "Restored"
+    elif paramMode == "l":
+      makeCtx()
+      for row in ctx.iterArchiveRows():
+        echo row
+    else:
+      echo "Unknown option: " & paramMode
 
   main()
