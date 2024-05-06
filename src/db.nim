@@ -392,6 +392,8 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
         writeFile(fullPath, "")
 
 when isMainModule:
+  import std/strformat
+
   proc main =
     template makeCtx: untyped =
       var ctx {.inject.} = initDbCtx("db.sqlite")
@@ -412,7 +414,8 @@ when isMainModule:
     elif paramMode == "l":
       makeCtx()
       for row in ctx.iterArchiveRows():
-        echo row
+        let timeStr = row.timestamp.fromUnix().format("yyyy-MM-dd hh:mm:ss")
+        echo &"id: {row.id} | name: \"{row.name}\" | insert time: {timeStr}"
     else:
       echo "Unknown option: " & paramMode
 
