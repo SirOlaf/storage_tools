@@ -347,6 +347,8 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string):
       continue
 
     let archivePathRows = self.iterArchivePathRows(archive.id).toSeq()
+    if files.len() != archivePathRows.len():
+      continue
     var foundAllFiles = true
     for insertedFile in files:
       var foundFile = false
