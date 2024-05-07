@@ -406,19 +406,27 @@ when isMainModule:
       var ctx {.inject.} = initDbCtx("db.sqlite")
 
     let paramMode = paramStr(1)
-    if paramMode == "i":
+    case paramMode
+    of "i", "insert":
       let insertPath = paramStr(2)
+      let name = if paramCount() > 2: some paramStr(3) else: none(string)
+
+      if name.isNone():
+        echo "Inserting with default name"
+      else:
+        echo "Inserting with name " & name.get()
+
       makeCtx()
-      discard ctx.insertDirectoryArchive(insertPath)
+      discard ctx.insertDirectoryArchive(insertPath, name)
       echo "Inserted"
-    elif paramMode == "r":
+    of "r", "restore":
       let
         restorePath = paramStr(2)
         archiveId = paramStr(3).parseInt()
       makeCtx()
       ctx.restoreArchive(archiveId.ArchiveId, restorePath)
       echo "Restored"
-    elif paramMode == "l":
+    of "l", "list":
       makeCtx()
       for row in ctx.iterArchiveRows():
         let timeStr = row.timestamp.fromUnix().format("yyyy-MM-dd hh:mm:ss")
