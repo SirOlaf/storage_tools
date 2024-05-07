@@ -44,6 +44,7 @@ type
     sha*: string
     timestamp*: int
     isCompressed*: bool
+    size*: uint64
 
   ArchiveTableRow* = object
     id*: ArchiveId
@@ -82,7 +83,8 @@ proc createTables(self: DbCtx) =
     crc32 INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    is_compressed INTEGER NOT NULL
+    is_compressed INTEGER NOT NULL,
+    size INTEGER NOT NULL
   ) STRICT""")
 
   self.connection.exec(sql"""CREATE TABLE IF NOT EXISTS archive_table (
@@ -174,6 +176,7 @@ proc toFileTableRow(row: Row): FileTableRow =
     sha : row[2],
     timestamp : row[3].parseInt(),
     isCompressed : row[4].parseInt() == 1,
+    size : row[5].parseInt().uint64,
   )
 
 proc toPathTableRow(row: Row): PathTableRow =
@@ -224,8 +227,9 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
 proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
+  let fileSize = data.len()
   template doInsert(crc: uint32, sha: string, isCompressed: bool): untyped =
-    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp, is_compressed) VALUES (?, ?, ?, ?)", crc.int, sha, getTimestamp(), isCompressed.int)
+    self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp, is_compressed, size) VALUES (?, ?, ?, ?, ?)", crc.int, sha, getTimestamp(), isCompressed.int, fileSize)
     result = (
       id : self.nextFileIdx.FileId,
       isNew : true,
@@ -252,8 +256,6 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
           ),
         )
       )
-    else:
-      writeFile(outPath, data)
     doInsert(crc, sha, isCompressed=compressed)
 
   # TODO: Maybe calculate entropy as a preliminary step
@@ -378,8 +380,11 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
       pathHead = relPath.splitPath().head
       fileRow = self.fetchFileByFileId(pathRow.fileId)
       contents = block:
-        let tmp = readFile(self.storePath.joinPath($fileRow.id.int))
-        self.masterKey.decryptData(fileRow.id.uint64.SubkeyId, tmp.toOpenArrayByte(0, tmp.len() - 1))
+        if fileRow.size == 0:
+          newSeq[byte](0)
+        else:
+          let tmp = readFile(self.storePath.joinPath($fileRow.id.int))
+          self.masterKey.decryptData(fileRow.id.uint64.SubkeyId, tmp.toOpenArrayByte(0, tmp.len() - 1))
 
     if pathHead != "":
       createDir(basePath.joinPath(pathHead))
