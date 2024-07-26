@@ -143,6 +143,7 @@ proc initDbCtx*(path: string = ":memory:"): DbCtx =
     let salt = cryptoEntry.saltHex.parseHexStr().Salt
     result.masterKey = deriveMasterKey(password, salt)
   else:
+    echo "Database does not exist yet."
     var password = readPasswordFromStdin("Create password: ")
     while true:
       let confirm = readPasswordFromStdin("Confirm password: ")
@@ -226,7 +227,7 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Make sure paths only use forwards slash
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
-proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: bool] =
+proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, isNew: bool] =
   let fileSize = data.len()
   template doInsert(crc: uint32, sha: string, isCompressed: bool): untyped =
     self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp, is_compressed, size) VALUES (?, ?, ?, ?, ?)", crc.int, sha, getTimestamp(), isCompressed.int, fileSize)
@@ -241,19 +242,14 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
     sha = data.sha256().toHex()
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
 
-  template writeStore(data: seq[byte] | string, compressed: bool) =
+  template writeStore(data: openArray[byte], compressed: bool) =
     let outPath = self.storePath.joinPath($self.nextFileIdx)
     if data.len() > 0:
       writeFile(
         outPath,
         self.masterKey.encryptData(
           self.nextFileIdx.uint64.SubkeyId,
-          (
-            when data is string:
-              data.toOpenArrayByte(0, data.len() - 1)
-            else:
-              data.toOpenArray(0, data.len() - 1)
-          ),
+          data,
         )
       )
     doInsert(crc, sha, isCompressed=compressed)
@@ -261,9 +257,9 @@ proc insertFileData(self: var DbCtx, data: string): tuple[id: FileId, isNew: boo
   # TODO: Maybe calculate entropy as a preliminary step
   if existingRow.isNone():
     if data.len() > 0:
-      let compressedData = compress(data)
+      let compressedData = compress(data.`=dup`())
       if compressedData.len() < data.len():
-        writeStore(compressedData, compressed=true)
+        writeStore(compressedData.toOpenArray(compressedData.low, compressedData.high), compressed=true)
       else:
         writeStore(data, compressed=false)
     else:
@@ -299,7 +295,8 @@ proc putPath(self: var DbCtx, archiveId: ArchiveId, fileId: FileId, path: string
 proc insertSingleFileArchive*(self: var DbCtx, path: string): PathId =
   let
     fileName = path.splitPath().tail
-    (fileId, isNew) = self.insertFileData(readFile(path))
+    fileData = readFile(path) # TODO: memfiles
+    (fileId, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
 
   if not isNew:
     for row in self.fetchPathRowsByFileId(fileId):
@@ -320,7 +317,8 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string):
   self.connection.exec(sql"BEGIN")
   for p in baseAbsPath.walkDirRec():
     let normalPath = p.absolutePath().relativePath(baseAbsPath)
-    let (fileId, isNew) = self.insertFileData(readFile(p))
+    let fileData = readFile(p)
+    let (fileId, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
     files.add((
       id : fileId,
       normalPath : normalPath,
@@ -386,7 +384,7 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
           newSeq[byte](0)
         else:
           let tmp = readFile(self.storePath.joinPath($fileRow.id.int))
-          self.masterKey.decryptData(fileRow.id.uint64.SubkeyId, tmp.toOpenArrayByte(0, tmp.len() - 1))
+          self.masterKey.decryptData(fileRow.id.uint64.SubkeyId, tmp.toOpenArrayByte(tmp.low, tmp.high))
 
     if pathHead != "":
       createDir(basePath.joinPath(pathHead))
