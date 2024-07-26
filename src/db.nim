@@ -216,6 +216,10 @@ iterator iterArchiveRows*(self: DbCtx): ArchiveTableRow =
   for row in self.connection.rows(sql"SELECT * FROM archive_table"):
     yield row.toArchiveTableRow()
 
+iterator iterArchiveRows*(self: DbCtx, name: string): ArchiveTableRow =
+  for row in self.connection.rows(sql"SELECT * FROM archive_table WHERE name = ?", name):
+    yield row.toArchiveTableRow()
+
 iterator iterArchivePathRows*(self: DbCtx, archiveId: ArchiveId): PathTableRow =
   for row in self.connection.rows(sql"SELECT * FROM path_table WHERE archive_id = ?", archiveId.int):
     yield row.toPathTableRow()
@@ -227,12 +231,13 @@ proc containsHashes*(self: DbCtx, crc: uint32, sha: string): bool {.inline.} =
 # TODO: Make sure paths only use forwards slash
 # TODO: Switch to streams/memory mapped files
 # TODO: Error correction codes
-proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, isNew: bool] =
+proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, insertedSize: int64, isNew: bool] =
   let fileSize = data.len()
-  template doInsert(crc: uint32, sha: string, isCompressed: bool): untyped =
+  template doInsert(crc: uint32, sha: string, size: int64, isCompressed: bool): untyped =
     self.connection.exec(sql"INSERT INTO file_table (crc32, sha256, timestamp, is_compressed, size) VALUES (?, ?, ?, ?, ?)", crc.int, sha, getTimestamp(), isCompressed.int, fileSize)
     result = (
       id : self.nextFileIdx.FileId,
+      insertedSize : size,
       isNew : true,
     )
     inc self.nextFileIdx
@@ -252,7 +257,7 @@ proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, i
           data,
         )
       )
-    doInsert(crc, sha, isCompressed=compressed)
+    doInsert(crc, sha, data.len(), isCompressed=compressed)
 
   # TODO: Maybe calculate entropy as a preliminary step
   if existingRow.isNone():
@@ -267,6 +272,7 @@ proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, i
   else:
     return (
       id : existingRow.unsafeGet().id,
+      insertedSize : existingRow.unsafeGet().size.int64,
       isNew : false,
     )
 
@@ -296,7 +302,7 @@ proc insertSingleFileArchive*(self: var DbCtx, path: string): PathId =
   let
     fileName = path.splitPath().tail
     fileData = readFile(path) # TODO: memfiles
-    (fileId, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
+    (fileId, insertedSize, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
 
   if not isNew:
     for row in self.fetchPathRowsByFileId(fileId):
@@ -305,7 +311,12 @@ proc insertSingleFileArchive*(self: var DbCtx, path: string): PathId =
   let archiveId = self.putNewFileArchive(fileName)
   self.putPath(archiveId, fileId, fileName)
 
-proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string): ArchiveId =
+template withTransaction*(ctx: DbCtx, body: untyped): untyped =
+  ctx.connection.exec(sql"BEGIN")
+  body
+  ctx.connection.exec(sql"COMMIT")
+
+proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string): tuple[id: ArchiveId, insertedSize: int64] =
   doAssert dirExists(path)
   let
     baseAbsPath = path.absolutePath().strip(chars={'/'}, leading=false, trailing=true)
@@ -314,59 +325,60 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string):
     newIds = initHashSet[int]()
     duplicatedIds = initHashSet[int]()
     files = newSeq[tuple[id: FileId, normalPath: string]]()
-  self.connection.exec(sql"BEGIN")
-  for p in baseAbsPath.walkDirRec():
-    let normalPath = p.absolutePath().relativePath(baseAbsPath)
-    let fileData = readFile(p)
-    let (fileId, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
-    files.add((
-      id : fileId,
-      normalPath : normalPath,
-    ))
-    if isNew:
-      newIds.incl(fileId.int)
-    elif fileId.int notin newIds: # ids that were just added are not counted as duplicates for this
-      duplicatedIds.incl(fileId.int)
+  var insertedBytes: int64 = 0
+  self.withTransaction:
+    for p in baseAbsPath.walkDirRec():
+      let normalPath = p.absolutePath().relativePath(baseAbsPath)
+      let fileData = readFile(p)
+      let (fileId, insertedSize, isNew) = self.insertFileData(fileData.toOpenArrayByte(fileData.low, fileData.high))
+      files.add((
+        id : fileId,
+        normalPath : normalPath,
+      ))
+      if isNew:
+        insertedBytes += insertedSize
+        newIds.incl(fileId.int)
+      elif fileId.int notin newIds: # ids that were just added are not counted as duplicates for this
+        duplicatedIds.incl(fileId.int)
 
-  var checkedArchives = initHashSet[int]()
-  # TODO: The performance of this is probably really bad
-  for archive in self.iterArchiveRows():
-    if archive.id.int in checkedArchives or archive.name != archiveName:
-      # if the name isn't the same or the archive has already been checked, skip
-      continue
-    var isInteresting = false
-    for archivePathRow in self.iterArchivePathRows(archive.id):
-      if archivePathRow.fileId.int in duplicatedIds:
-        isInteresting = true
-        break
-    # added before the check to avoid doing extra work during the next iterations
-    checkedArchives.incl(archive.id.int)
-    if not isInteresting:
-      continue
-
-    let archivePathRows = self.iterArchivePathRows(archive.id).toSeq()
-    if files.len() != archivePathRows.len():
-      continue
-    var foundAllFiles = true
-    for insertedFile in files:
-      var foundFile = false
-      for archiveFile in archivePathRows:
-        if insertedFile.id.int == archiveFile.fileId.int and insertedFile.normalPath == archiveFile.path:
-          foundFile = true
+    var checkedArchives = initHashSet[int]()
+    # TODO: The performance of this is probably really bad
+    for archive in self.iterArchiveRows(archiveName):
+      if archive.id.int in checkedArchives:
+        # if the name isn't the same or the archive has already been checked, skip
+        continue
+      var isInteresting = false
+      for archivePathRow in self.iterArchivePathRows(archive.id):
+        if archivePathRow.fileId.int in duplicatedIds:
+          isInteresting = true
           break
-      if not foundFile:
-        foundAllFiles = false
-        break
-    if not foundAllFiles:
-      continue
+      # added before the check to avoid doing extra work during the next iterations
+      checkedArchives.incl(archive.id.int)
+      if not isInteresting:
+        continue
 
-    # The archive is a perfect duplicate. Return early.
-    return archive.id
+      let archivePathRows = self.iterArchivePathRows(archive.id).toSeq()
+      if files.len() != archivePathRows.len():
+        continue
+      var foundAllFiles = true
+      for insertedFile in files:
+        var foundFile = false
+        for archiveFile in archivePathRows:
+          if insertedFile.id.int == archiveFile.fileId.int and insertedFile.normalPath == archiveFile.path:
+            foundFile = true
+            break
+        if not foundFile:
+          foundAllFiles = false
+          break
+      if not foundAllFiles:
+        continue
 
-  result = self.putNewDirectoryArchive(archiveName)
-  for file in files:
-    discard self.putPath(result, file.id, file.normalPath)
-  self.connection.exec(sql"COMMIT")
+      # The archive is a perfect duplicate. Return early.
+      return (id : archive.id, insertedSize : 0)
+
+    result = (id : self.putNewDirectoryArchive(archiveName), insertedSize : insertedBytes)
+    for file in files:
+      discard self.putPath(result.id, file.id, file.normalPath)
 
 proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
   let basePath = targetPath.absolutePath()
@@ -415,8 +427,8 @@ when isMainModule:
         echo "Inserting with name " & name.get()
 
       makeCtx()
-      discard ctx.insertDirectoryArchive(insertPath, name)
-      echo "Inserted"
+      let insertInfo = ctx.insertDirectoryArchive(insertPath, name)
+      echo "Inserted " & insertInfo.insertedSize.formatSize() & " into the store"
     of "r", "restore":
       let
         restorePath = paramStr(2)
