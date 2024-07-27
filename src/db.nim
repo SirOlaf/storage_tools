@@ -262,7 +262,7 @@ proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, i
   # TODO: Maybe calculate entropy as a preliminary step
   if existingRow.isNone():
     if data.len() > 0:
-      let compressedData = compress(data.`=dup`())
+      let compressedData = compress(data.toOpenArray(data.low, data.high))
       if compressedData.len() < data.len():
         writeStore(compressedData.toOpenArray(compressedData.low, compressedData.high), compressed=true)
       else:
