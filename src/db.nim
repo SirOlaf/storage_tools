@@ -316,7 +316,7 @@ template withTransaction*(ctx: DbCtx, body: untyped): untyped =
   body
   ctx.connection.exec(sql"COMMIT")
 
-proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string): tuple[id: ArchiveId, insertedSize: int64] =
+proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string): tuple[id: ArchiveId, insertedSize: int64, isNew: bool] =
   doAssert dirExists(path)
   let
     baseAbsPath = path.absolutePath().strip(chars={'/'}, leading=false, trailing=true)
@@ -374,9 +374,9 @@ proc insertDirectoryArchive*(self: var DbCtx, path: string, name = none string):
         continue
 
       # The archive is a perfect duplicate. Return early.
-      return (id : archive.id, insertedSize : 0)
+      return (id : archive.id, insertedSize : 0, isNew : false)
 
-    result = (id : self.putNewDirectoryArchive(archiveName), insertedSize : insertedBytes)
+    result = (id : self.putNewDirectoryArchive(archiveName), insertedSize : insertedBytes, isNew : true)
     for file in files:
       discard self.putPath(result.id, file.id, file.normalPath)
 
@@ -428,7 +428,10 @@ when isMainModule:
 
       makeCtx()
       let insertInfo = ctx.insertDirectoryArchive(insertPath, name)
-      echo "Inserted " & insertInfo.insertedSize.formatSize() & " into the store"
+      if insertInfo.isNew:
+        echo "Inserted " & insertInfo.insertedSize.formatSize() & " into the store with id " & $insertInfo.id
+      else:
+        echo "Did not insert the archive. It is a perfect duplicate of archive with id " & $insertInfo.id
     of "r", "restore":
       let
         restorePath = paramStr(2)
