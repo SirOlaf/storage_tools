@@ -21,6 +21,14 @@ const DbContextName = ['F', 'i', 'l', 'e', 't', 'o', 'o', 'l']
 static:
   doAssert DbContextName.len() == 8
 
+# Every bottom level folder contains 1000 files, mid level folders each contain 100 bottom folders.
+# Top level store contains an arbitrary number of mid level folders.
+# Thus, every mid level folder will contain a total of 100k files
+const
+  StoreInnerFolderCount = 100
+  StoreInnerFolderFileCount = 1000
+  StoreMidFolderFileCount = StoreInnerFolderCount * StoreInnerFolderFileCount
+
 
 type
   DbCtx* = object
@@ -69,6 +77,15 @@ proc `=destroy`*(self: var DbCtx) =
 
 
 proc getTimestamp(): int = now().utc().toTime().toUnix()
+
+
+proc calcMidFolderId(fileId: FileId): int {.inline.} =
+  let fileId = fileId.int - 1
+  fileId div StoreMidFolderFileCount
+
+proc calcBottomFolderId(fileId: FileId): int {.inline.} =
+  let fileId = fileId.int - 1
+  (fileId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
 
 
 proc createTables(self: DbCtx) =
@@ -248,12 +265,20 @@ proc insertFileData(self: var DbCtx, data: openArray[byte]): tuple[id: FileId, i
     existingRow = self.tryGetFileTableRowByHashes(crc, sha)
 
   template writeStore(data: openArray[byte], compressed: bool) =
-    let outPath = self.storePath.joinPath($self.nextFileIdx)
+    let
+      fileId = self.nextFileIdx
+      midFolderId = calcMidFolderId(fileId.FileId)
+      bottomFolderId = calcBottomFolderId(fileId.FileId)
+
+    var destDir = self.storePath.joinPath($midFolderId).joinPath($bottomFolderId)
+    createDir(destDir)
+
+    let outPath = destDir.joinPath($fileId)
     if data.len() > 0:
       writeFile(
         outPath,
         self.masterKey.encryptData(
-          self.nextFileIdx.uint64.SubkeyId,
+          fileId.uint64.SubkeyId,
           data,
         )
       )
@@ -395,7 +420,11 @@ proc restoreArchive*(self: DbCtx, archiveId: ArchiveId, targetPath: string) =
         if fileRow.size == 0:
           newSeq[byte](0)
         else:
-          let tmp = readFile(self.storePath.joinPath($fileRow.id.int))
+          let
+            midFolderId = calcMidFolderId(fileRow.id)
+            bottomFolderId = calcBottomFolderId(fileRow.id)
+
+          let tmp = readFile(self.storePath.joinPath($midFolderId).joinPath($bottomFolderId).joinPath($fileRow.id))
           self.masterKey.decryptData(fileRow.id.uint64.SubkeyId, tmp.toOpenArrayByte(tmp.low, tmp.high))
 
     if pathHead != "":
