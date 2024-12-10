@@ -37,6 +37,7 @@ const
 
 type
   BlockId = uint32
+  FileIndex* = int
 
   FileEntry* {.packed.} = object
     timestamp*: uint64
@@ -49,12 +50,9 @@ type
       # mask 1 << 14: isCompressed
 
   SmallFileInfo = object
-    crc32: uint32
-    sha256: array[32, byte]
     sourcePath: string
-    finalSize: uint64
-    shouldCompress: bool
     index: int64
+    finalSize: uint64
 
   FileDb* = object
     entries: ptr array[dbSize, FileEntry]
@@ -116,6 +114,7 @@ proc `fileSize=`(entry: var FileEntry, x: uint64) {.inline.} =
 
 
 proc nextBlockId(db: FileDb): BlockId =
+  # TODO: Could be stored in FileDb instance
   var res = -1
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
@@ -124,6 +123,7 @@ proc nextBlockId(db: FileDb): BlockId =
   raiseAssert "Failed to find a block id"
 
 proc findTailIndex(db: FileDb): int =
+  # TODO: Could be stored in FileDb instance
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
       return i
@@ -151,11 +151,8 @@ proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
   writeFile(joinPath(destDir, $blockId), encryptedData)
 
 
-proc insertFile*(db: var FileDb, filePath: string) =
-  # TODO: Return assigned file index for use in the archive layer
-  #   -> Put stub into db and fill in the gaps during commit
-  # TODO: Deduplicate files
-  #let rawData = readFile(filePath)
+proc insertFile*(db: var FileDb, filePath: string): FileIndex =
+  # TODO: Deduplicate files (and return existing index?)
   var rawPtr = memfiles.open(filePath)
   defer: rawPtr.close()
   if rawPtr.size == 0:
@@ -180,26 +177,24 @@ proc insertFile*(db: var FileDb, filePath: string) =
   if not shouldCompress:
     compressedData.setLen(0)
 
+  var entry = FileEntry(
+    timestamp : getTimestamp().uint64,
+    crc32 : crc32,
+    sha256 : sha256,
+  )
+  entry.isInSmallBlock = relevantSize.uint < smallBlockSize() div 2
+  entry.fileSize = relevantSize.uint
+  entry.isCompressed = shouldCompress
+  result = db.findTailIndex()
+
   if relevantSize.uint < smallBlockSize() div 2:
     db.smallFileQueue.add(SmallFileInfo(
-      crc32 : crc32,
-      sha256 : sha256,
       sourcePath : filePath,
+      index : result,
       finalSize : relevantSize.uint,
-      shouldCompress : shouldCompress,
     ))
   else:
-    var entry = FileEntry(
-      timestamp : getTimestamp().uint64,
-      blockId : db.nextBlockId(),
-      crc32 : crc32,
-      sha256 : sha256,
-    )
-    entry.isInSmallBlock = false
-    entry.fileSize = relevantSize.uint
-    entry.isCompressed = shouldCompress
-    db.entries[db.findTailIndex] = entry
-
+    entry.blockId = db.nextBlockId()
     db.submitFileToStore(
       entry.blockid,
       (
@@ -209,6 +204,7 @@ proc insertFile*(db: var FileDb, filePath: string) =
           cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1)
       ),
     )
+  db.entries[result] = entry
 
 proc commit*(db: var FileDb) =
   var
@@ -229,33 +225,18 @@ proc commit*(db: var FileDb) =
   if bucket[0] != 0:
     filledBuckets.add(bucket)
 
-  var
-    blockId = db.nextBlockId()
-    tailIdx = db.findTailIndex()
+  var blockId = db.nextBlockId()
   for bucket in filledBuckets:
-
     var page = newSeq[byte](smallBlockSize())
     var pageOffset = 0u64
     for info in bucket[1]:
-      if tailIdx >= dbSize:
-        raiseAssert "Database is full. Multifile db is not ready yet"
       let sourceData = readFile(info.sourcePath)
       let outData = compress(sourceData.toOpenArrayByte(sourceData.low, sourceData.high))
       copyMem(addr page[pageOffset], addr outData[0], outData.len())
 
-      var entry = FileEntry(
-        timestamp : getTimestamp().uint64,
-        blockId : blockId,
-        crc32 : info.crc32,
-        sha256 : info.sha256,
-        internalFileSize : info.finalSize.uint32,
-        internalBlockOffset : pageOffset.uint16,
-      )
-      entry.isInSmallBlock = true
-      entry.isCompressed = info.shouldCompress
-      db.entries[tailIdx] = entry
-      inc pageOffset, info.finalSize
-      inc tailIdx
+      db.entries[info.index].rawBlockOffset = pageOffset.uint16
+      db.entries[info.index].blockId = blockid
+      inc pageOffset, db.entries[info.index].fileSize
 
     db.submitFileToStore(blockId, page.toOpenArray(page.low, pageOffset.int - 1))
 
@@ -291,7 +272,7 @@ when isMainModule:
   db.transaction:
     for x in walkDirRec("."):
       if getFileSize(x) > 0:
-        db.insertFile(x)
+        discard db.insertFile(x)
 
   var totalFiles = 0
   for i in 0 ..< dbSize:
