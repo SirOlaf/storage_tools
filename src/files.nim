@@ -45,6 +45,7 @@ type
     sourcePath: string
     finalSize: uint64
     shouldCompress: bool
+    index: int64
 
   FileDb* = object
     entries: ptr array[dbSize, FileEntry]
@@ -89,7 +90,7 @@ proc blockOffset*(entry: FileEntry): uint16 {.inline.} =
 
 
 
-proc getTimestamp(): int = now().utc().toTime().toUnix()
+proc getTimestamp(): int {.inline.} = now().utc().toTime().toUnix()
 
 proc fileSize*(entry: FileEntry): uint64 {.inline.} =
   if entry.isInSmallBlock:
@@ -119,20 +120,15 @@ proc findTailIndex(db: FileDb): int =
       return i
   raiseAssert "Failed to find tail index"
 
-proc putDbEntryBigFile(db: var Filedb, crc32: uint32, sha256: array[32, byte], finalSize: uint32, compressed: bool, blockId: BlockId, dbIdx: int) =
-  var entry = FileEntry(
-    timestamp : getTimestamp().uint64,
-    blockId : blockId,
-    crc32 : crc32,
-    sha256 : sha256,
-  )
-  entry.isInSmallBlock = false
-  entry.fileSize = finalSize
-  entry.isCompressed = compressed
-  db.entries[dbIdx] = entry
+
+proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
+  let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
+  writeFile(joinPath(db.storePath, $blockId), encryptedData)
 
 proc insertFile*(db: var FileDb, filePath: string) =
-  # TODO: Disallow empty files, they should be handled by the archive layer
+  # TODO: Return assigned file index for use in the archive layer
+  #   -> Put stub into db and fill in the gaps during commit
+  # TODO: Deduplicate files
   let rawData = readFile(filePath)
   if rawData.len() == 0:
     raiseAssert "Bad file size"
@@ -153,8 +149,6 @@ proc insertFile*(db: var FileDb, filePath: string) =
     else:
       rawData.len()
   let shouldCompress = relevantSize < rawData.len()
-
-  # TODO: Deduplicate in both branches
   if relevantSize.uint < smallBlockSize() div 2:
     db.smallFileQueue.add(SmallFileInfo(
       crc32 : crc32,
@@ -184,7 +178,7 @@ proc insertFile*(db: var FileDb, filePath: string) =
           rawData.toOpenArrayByte(rawData.low, rawData.high)
       ),
     )
-    writeFile(joinPath(db.storePath, $entry.blockId), encryptedData)
+    db.submitFileToStore(entry.blockid, encryptedData)
 
 proc commit*(db: var FileDb) =
   var
@@ -235,9 +229,9 @@ proc commit*(db: var FileDb) =
 
     let encryptedData = db.masterKey.encryptData(
       blockId.SubkeyId,
-      page,
+      page.toOpenArray(page.low, pageOffset.int - 1),
     )
-    writeFile(joinPath(db.storePath, $blockId), encryptedData)
+    db.submitFileToStore(blockId, encryptedData)
 
     inc blockId
 
@@ -259,20 +253,27 @@ when isMainModule:
   var dbRaw = default(array[dbSize, FileEntry])
   #copyMem(addr dbRaw[0], addr dbFileData[0], dbFileData.len())
 
-  var db = FileDb(entries : addr dbRaw, storePath : "/tmp/storage_tools/db/store")
+  var db = FileDb(
+    entries : addr dbRaw,
+    storePath : "/tmp/storage_tools/db/store",
+    masterKey : deriveMasterKey("test", generateSalt())
+  )
   createDir(db.storePath)
 
-  var i = 0
+  var startTime = cpuTime()
+
   db.transaction:
     for x in walkDirRec("."):
       if getFileSize(x) > 0:
         db.insertFile(x)
-        inc i
 
+  var totalFiles = 0
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
+      totalFiles = i
       break
-    echo db.entries[i], " ", db.entries[i].isInSmallBlock, " ", db.entries[i].isCompressed, " ", db.entries[i].fileSize.int64.formatSize(), " ", db.entries[i].blockOffset
+  #  echo db.entries[i], " ", db.entries[i].isInSmallBlock, " ", db.entries[i].isCompressed, " ", db.entries[i].fileSize.int64.formatSize(), " ", db.entries[i].blockOffset
 
-  echo "insert count: ", i
+  echo "insert count: ", totalFiles
+  echo "time: ", $(cpuTime() - startTime)
   #writeFile("/tmp/storage_tools/db/1.filedb", cast[ptr array[sizeof(dbRaw), byte]](addr dbRaw)[])
