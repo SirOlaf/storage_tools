@@ -170,7 +170,6 @@ proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
 
 
 proc insertFile*(db: var FileDb, filePath: string): FileIndex =
-  # TODO: Deduplicate files (and return existing index?)
   var rawPtr = memfiles.open(filePath)
   defer: rawPtr.close()
   if rawPtr.size == 0:
