@@ -7,9 +7,9 @@ import sodium/sodium_internal
 
 
 const
-  saltSize = 16
+  saltSize* = 16
   keySize = 32
-  pwHashSize = 128
+  pwHashSize* = 128
   cryptoCtxName = ['F', 'i', 'l', 'e', 't', 'o', 'o', 'l']
 
 static:

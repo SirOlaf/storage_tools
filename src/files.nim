@@ -56,15 +56,25 @@ type
 
   FileDb* = object
     entries: ptr array[dbSize, FileEntry]
+    entriesPointerSelfManaged: bool
     smallFileQueue: seq[SmallFileInfo]
-    masterKey: MasterKey
-    storePath: string
-    tmpKnownHashes: HashSet[array[32, byte]] # TODO: REMOVE, ONLY FOR DEBUGGING
+    dbPath: string
+    storePath: string # stored separately from dbPath in preparation for a detached usecase
+    knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextBlockId: BlockId
     nextEntryIndex: FileIndex
+    masterKey: MasterKey
+    # salt and password hash are appended to the end of the file
+    salt: Salt
+    pwHash: PwHash
 
 
 doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
+
+
+proc `=destroy`(db: FileDb) =
+  if db.entriesPointerSelfManaged:
+    dealloc(db.entries)
 
 
 proc smallBlockSize(): uint64 {.inline.} = internalSmallBlockSize - secretstreamOverhead()
@@ -170,9 +180,9 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
     crc32 = crc32(rawPtr.mem, rawPtr.size)
     sha256 = sha256(rawPtr.mem, rawPtr.size)
 
-  if sha256 in db.tmpKnownHashes:
+  if sha256 in db.knownHashes:
     return
-  db.tmpKnownHashes.incl(sha256)
+  db.knownHashes.incl(sha256)
 
   var compressedData = compress(cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1))
   let relevantSize = block:
@@ -258,32 +268,62 @@ template transaction(db: var FileDb, body: untyped): untyped =
 
 
 
+proc openFileDb*(dbPath: string, password: string): FileDb =
+  # TODO: Support multifile once above 1 million files
+  let dbBuff = create(array[dbSize, FileEntry])
+  let storePath = joinPath(dbPath, "store")
+
+  var
+    salt = default(Salt)
+    pwHash = default(PwHash)
+  if fileExists(dbPath.joinPath("1.filedb")):
+    var dbFileData = readFile(dbPath.joinPath("1.filedb"))
+    copyMem(dbBuff, addr dbFileData[0], sizeof(array[dbSize, FileEntry]))
+    salt.string.setLen(saltSize)
+    copyMem(addr salt.string[0], addr dbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
+    copyMem(addr pwHash.asArray()[0], addr dbFileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
+    if not verifyPassword(pwHash, password): # TODO: Should the hash be refreshed every time db is saved?
+      raiseAssert "Wrong password"
+  else:
+    salt = generateSalt()
+    pwHash = hashPassword(password)
+  result = FileDb(
+    entries : dbBuff,
+    entriesPointerSelfManaged : true,
+    dbPath : dbPath,
+    storePath : storePath,
+    masterKey : deriveMasterKey(password, salt),
+    salt : salt,
+    pwHash : pwHash,
+    knownHashes : initHashSet[array[32, byte]](),
+  )
+  result.nextBlockId = result.searchNextBlockId()
+  result.nextEntryIndex = result.searchTailIndex()
+
+  for i in 0 ..< result.nextEntryIndex:
+    result.knownHashes.incl(result.entries[i].sha256)
+
+proc save*(db: var FileDb) =
+  var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
+  copyMem(addr outBuff[0], db.entries, sizeof(array[dbSize, FileEntry]))
+  copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.salt.string[0], saltSize)
+  copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
+  writeFile(joinPath(db.dbPath, "1.filedb"), outBuff)
+
+
 when isMainModule:
   import std/[
     strutils,
   ]
 
-  #var dbFileData = readFile("/tmp/storage_tools/db/1.filedb")
-
-  var dbRaw = default(array[dbSize, FileEntry])
-  #copyMem(addr dbRaw[0], addr dbFileData[0], dbFileData.len())
-
-  var db = FileDb(
-    entries : addr dbRaw,
-    storePath : "/tmp/storage_tools/db/store",
-    masterKey : deriveMasterKey("test", generateSalt())
+  var db = openFileDb(
+    "/tmp/storage_tools/db",
+    "test",
   )
-  db.nextBlockId = db.searchNextBlockId()
-  db.nextEntryIndex = db.searchTailIndex()
 
   createDir(db.storePath)
 
   var startTime = cpuTime()
-
-  for i in 0 ..< 900_000:
-    db.entries[i] = FileEntry(internalFileSize : 1000)
-  db.nextBlockId = db.searchNextBlockId()
-  db.nextEntryIndex = db.searchTailIndex()
 
   db.transaction:
     for x in walkDirRec("."):
@@ -299,4 +339,4 @@ when isMainModule:
 
   echo "insert count: ", totalFiles
   echo "time: ", $(cpuTime() - startTime)
-  #writeFile("/tmp/storage_tools/db/1.filedb", cast[ptr array[sizeof(dbRaw), byte]](addr dbRaw)[])
+  #db.save()
