@@ -25,6 +25,14 @@ const
   shiftBlockOffset = 11
   maskBlockOffset = (1 shl (shiftBlockOffset + 1)) - 1
 
+# Every bottom level folder contains 1000 files, mid level folders each contain 100 bottom folders.
+# Top level store contains an arbitrary number of mid level folders.
+# Thus, every mid level folder will contain a total of 100k files
+const
+  StoreInnerFolderCount = 100
+  StoreInnerFolderFileCount = 1000
+  StoreMidFolderFileCount = StoreInnerFolderCount * StoreInnerFolderFileCount
+
 
 type
   BlockId = uint32
@@ -121,9 +129,25 @@ proc findTailIndex(db: FileDb): int =
   raiseAssert "Failed to find tail index"
 
 
+proc calcMidFolderId(blockId: BlockId): int {.inline.} =
+  let blockId = blockId.int - 1
+  blockId div StoreMidFolderFileCount
+
+proc calcBottomFolderId(blockId: BlockId): int {.inline.} =
+  let blockId = blockId.int - 1
+  (blockId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
+
 proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
   let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
-  writeFile(joinPath(db.storePath, $blockId), encryptedData)
+
+  let
+    midFolderId = calcMidFolderId(blockId)
+    bottomFolderId = calcBottomFolderId(blockId)
+
+  var destDir = db.storePath.joinPath($midFolderId).joinPath($bottomFolderId)
+  createDir(destDir)
+  writeFile(joinPath(destDir, $blockId), encryptedData)
+
 
 proc insertFile*(db: var FileDb, filePath: string) =
   # TODO: Return assigned file index for use in the archive layer
