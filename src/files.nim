@@ -60,6 +60,8 @@ type
     masterKey: MasterKey
     storePath: string
     tmpKnownHashes: HashSet[array[32, byte]] # TODO: REMOVE, ONLY FOR DEBUGGING
+    nextBlockId: BlockId
+    nextEntryIndex: FileIndex
 
 
 doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
@@ -113,8 +115,7 @@ proc `fileSize=`(entry: var FileEntry, x: uint64) {.inline.} =
     entry.internalFileSize = (x shr shiftBlockOffset).uint32
 
 
-proc nextBlockId(db: FileDb): BlockId =
-  # TODO: Could be stored in FileDb instance
+proc searchNextBlockId(db: FileDb): BlockId =
   var res = -1
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
@@ -122,12 +123,19 @@ proc nextBlockId(db: FileDb): BlockId =
     res = i
   raiseAssert "Failed to find a block id"
 
-proc findTailIndex(db: FileDb): int =
-  # TODO: Could be stored in FileDb instance
+proc searchTailIndex(db: FileDb): FileIndex =
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
       return i
   raiseAssert "Failed to find tail index"
+
+proc advanceBlockId(db: var FileDb): BlockId =
+  result = db.nextBlockId
+  inc db.nextBlockId
+
+proc advanceFileIndex(db: var FileDb): FileIndex =
+  result = db.nextEntryIndex
+  inc db.nextEntryIndex
 
 
 proc calcMidFolderId(blockId: BlockId): int {.inline.} =
@@ -185,7 +193,7 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
   entry.isInSmallBlock = relevantSize.uint < smallBlockSize() div 2
   entry.fileSize = relevantSize.uint
   entry.isCompressed = shouldCompress
-  result = db.findTailIndex()
+  result = db.advanceFileIndex()
 
   if relevantSize.uint < smallBlockSize() div 2:
     db.smallFileQueue.add(SmallFileInfo(
@@ -194,7 +202,7 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
       finalSize : relevantSize.uint,
     ))
   else:
-    entry.blockId = db.nextBlockId()
+    entry.blockId = db.advanceBlockId()
     db.submitFileToStore(
       entry.blockid,
       (
@@ -225,7 +233,7 @@ proc commit*(db: var FileDb) =
   if bucket[0] != 0:
     filledBuckets.add(bucket)
 
-  var blockId = db.nextBlockId()
+  var blockId = db.advanceBlockId()
   for bucket in filledBuckets:
     var page = newSeq[byte](smallBlockSize())
     var pageOffset = 0u64
@@ -265,9 +273,17 @@ when isMainModule:
     storePath : "/tmp/storage_tools/db/store",
     masterKey : deriveMasterKey("test", generateSalt())
   )
+  db.nextBlockId = db.searchNextBlockId()
+  db.nextEntryIndex = db.searchTailIndex()
+
   createDir(db.storePath)
 
   var startTime = cpuTime()
+
+  for i in 0 ..< 900_000:
+    db.entries[i] = FileEntry(internalFileSize : 1000)
+  db.nextBlockId = db.searchNextBlockId()
+  db.nextEntryIndex = db.searchTailIndex()
 
   db.transaction:
     for x in walkDirRec("."):
