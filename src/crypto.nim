@@ -106,6 +106,8 @@ proc deriveSubkey*(key: MasterKey, id: SubkeyId): CryptoKey =
     key.asArray()
   ) == 0
 
+proc secretstreamOverhead*(): uint = crypto_secretstream_xchacha20poly1305_ABYTES().uint + 24 # ABYTES + header.len()
+
 proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): seq[byte] =
   if data.len() == 0:
     return @[]
@@ -131,6 +133,9 @@ proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): se
     0,
     crypto_secretstream_xchacha20poly1305_TAG_FINAL(),
   ) == 0
+  reset state
+  let finalSize = header.len() + outLen.int
+  doAssert finalSize == result.len(), $finalSize & " : " & $result.len()
 
 proc decryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): seq[byte] =
   if data.len() == 0:
