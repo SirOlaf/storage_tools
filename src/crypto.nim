@@ -108,9 +108,9 @@ proc deriveSubkey*(key: MasterKey, id: SubkeyId): CryptoKey =
 
 proc secretstreamOverhead*(): uint = crypto_secretstream_xchacha20poly1305_ABYTES().uint + 24 # ABYTES + header.len()
 
-proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): seq[byte] =
+proc encryptDataInto*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte], dest: openArray[byte]) =
   if data.len() == 0:
-    return @[]
+    return
   let key = masterKey.deriveSubkey(id)
   var
     state = default(crypto_secretstream_xchacha20poly1305_state)
@@ -120,12 +120,12 @@ proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): se
     header,
     key.asArray(),
   ) == 0
-  result = newSeq[byte](crypto_secretstream_xchacha20poly1305_ABYTES().int + header.len() + data.len())
-  copyMem(addr result[0], addr header[0], header.len())
+  doAssert dest.len() == secretstreamOverhead().int + data.len()
+  copyMem(addr dest[0], addr header[0], header.len())
   var outLen = 0.culonglong
   doAssert crypto_secretstream_xchacha20poly1305_push(
     addr state,
-    addr result[header.len()],
+    addr dest[header.len()],
     addr outLen,
     cast[ptr byte](addr data[0]),
     data.len().culonglong,
@@ -135,7 +135,11 @@ proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): se
   ) == 0
   reset state
   let finalSize = header.len() + outLen.int
-  doAssert finalSize == result.len(), $finalSize & " : " & $result.len()
+  doAssert finalSize == dest.len(), $finalSize & " : " & $dest.len()
+
+proc encryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): seq[byte] =
+  result = newSeq[byte](secretstreamOverhead().int + data.len())
+  masterKey.encryptDataInto(id, data, result)
 
 proc decryptData*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte]): seq[byte] =
   if data.len() == 0:

@@ -3,6 +3,7 @@ import std/[
   algorithm,
   times,
   sets,
+  memfiles,
 ]
 
 import crunchy
@@ -138,6 +139,7 @@ proc calcBottomFolderId(blockId: BlockId): int {.inline.} =
   (blockId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
 
 proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
+  # TODO: Use memfiles here too?
   let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
 
   let
@@ -153,26 +155,31 @@ proc insertFile*(db: var FileDb, filePath: string) =
   # TODO: Return assigned file index for use in the archive layer
   #   -> Put stub into db and fill in the gaps during commit
   # TODO: Deduplicate files
-  let rawData = readFile(filePath)
-  if rawData.len() == 0:
+  #let rawData = readFile(filePath)
+  var rawPtr = memfiles.open(filePath)
+  defer: rawPtr.close()
+  if rawPtr.size == 0:
     raiseAssert "Bad file size"
 
   let
-    crc32 = rawData.crc32()
-    sha256 = rawData.sha256()
+    crc32 = crc32(rawPtr.mem, rawPtr.size)
+    sha256 = sha256(rawPtr.mem, rawPtr.size)
 
   if sha256 in db.tmpKnownHashes:
     return
   db.tmpKnownHashes.incl(sha256)
 
-  let compressedData = compress(rawData)
+  var compressedData = compress(cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1))
   let relevantSize = block:
     let compressedSize = compressedData.len()
-    if compressedSize < rawData.len():
+    if compressedSize < rawPtr.size:
       compressedSize
     else:
-      rawData.len()
-  let shouldCompress = relevantSize < rawData.len()
+      rawPtr.size
+  let shouldCompress = relevantSize < rawPtr.size
+  if not shouldCompress:
+    compressedData.setLen(0)
+
   if relevantSize.uint < smallBlockSize() div 2:
     db.smallFileQueue.add(SmallFileInfo(
       crc32 : crc32,
@@ -193,16 +200,15 @@ proc insertFile*(db: var FileDb, filePath: string) =
     entry.isCompressed = shouldCompress
     db.entries[db.findTailIndex] = entry
 
-    let encryptedData = db.masterKey.encryptData(
-      entry.blockId.SubkeyId,
+    db.submitFileToStore(
+      entry.blockid,
       (
         if shouldCompress:
           compressedData.toOpenArray(compressedData.low, compressedData.high)
         else:
-          rawData.toOpenArrayByte(rawData.low, rawData.high)
+          cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1)
       ),
     )
-    db.submitFileToStore(entry.blockid, encryptedData)
 
 proc commit*(db: var FileDb) =
   var
@@ -251,11 +257,7 @@ proc commit*(db: var FileDb) =
       inc pageOffset, info.finalSize
       inc tailIdx
 
-    let encryptedData = db.masterKey.encryptData(
-      blockId.SubkeyId,
-      page.toOpenArray(page.low, pageOffset.int - 1),
-    )
-    db.submitFileToStore(blockId, encryptedData)
+    db.submitFileToStore(blockId, page.toOpenArray(page.low, pageOffset.int - 1))
 
     inc blockId
 
