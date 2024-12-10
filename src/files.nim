@@ -272,6 +272,7 @@ proc openFileDb*(dbPath: string, password: string): FileDb =
   # TODO: Support multifile once above 1 million files
   let dbBuff = create(array[dbSize, FileEntry])
   let storePath = joinPath(dbPath, "store")
+  createDir(storePath)
 
   var
     salt = default(Salt)
@@ -320,8 +321,6 @@ when isMainModule:
     "/tmp/storage_tools/db",
     "test",
   )
-
-  createDir(db.storePath)
 
   var startTime = cpuTime()
 
