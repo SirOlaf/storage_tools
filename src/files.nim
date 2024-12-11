@@ -280,7 +280,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     salt = default(Salt)
     pwHash = default(PwHash)
   if fileExists(dbPath.joinPath("1.filedb")):
-    var dbFileData = readFile(dbPath.joinPath("1.filedb"))
+    var dbFileData = decompress(readFile(dbPath.joinPath("1.filedb")))
     copyMem(dbBuff, addr dbFileData[0], sizeof(array[dbSize, FileEntry]))
     salt.string.setLen(saltSize)
     copyMem(addr salt.string[0], addr dbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
@@ -311,7 +311,7 @@ proc save*(db: var FileDb) =
   copyMem(addr outBuff[0], db.entries, sizeof(array[dbSize, FileEntry]))
   copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.salt.string[0], saltSize)
   copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
-  writeFile(joinPath(db.dbPath, "1.filedb"), outBuff)
+  writeFile(joinPath(db.dbPath, "1.filedb"), compress(outBuff))
 
 
 when isMainModule:
