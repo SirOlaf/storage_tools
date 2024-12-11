@@ -4,6 +4,7 @@ import std/[
   times,
   sets,
   memfiles,
+  tables,
 ]
 
 import crunchy
@@ -156,17 +157,62 @@ proc calcBottomFolderId(blockId: BlockId): int {.inline.} =
   let blockId = blockId.int - 1
   (blockId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
 
-proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
-  # TODO: Use memfiles here too?
-  let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
 
+proc blockIdToStoreDir(db: FileDb, blockId: BlockId): string =
   let
     midFolderId = calcMidFolderId(blockId)
     bottomFolderId = calcBottomFolderId(blockId)
+  db.storePath.joinPath($midFolderId).joinPath($bottomFolderId)
 
-  var destDir = db.storePath.joinPath($midFolderId).joinPath($bottomFolderId)
-  createDir(destDir)
-  writeFile(joinPath(destDir, $blockId), encryptedData)
+proc blockIdToStorePath(db: FileDb, blockId: BlockId): string =
+  db.blockIdToStoreDir(blockid).joinPath($blockId)
+
+proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
+  # TODO: Use memfiles here too?
+  let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
+  createDir(db.blockIdToStoreDir(blockId))
+  writeFile(db.blockIdToStorePath(blockId), encryptedData)
+
+proc loadBlockFromStore(db: FileDb, blockId: BlockId): seq[byte] =
+  var inData = readFile(db.blockIdToStorePath(blockId))
+  db.masterKey.decryptData(blockId.SubkeyId, inData.toOpenArrayByte(inData.low, inData.high))
+
+# TODO: Maybe return slices instead
+# TODO: Maybe use intervals instead of offsetsAndSizes
+iterator iterOffsetsFromSmallBlock(db: FileDb, blockId: BlockId, offsetsAndSizes: seq[tuple[offset: int, size: int]]): seq[byte] =
+  let blockData = db.loadBlockFromStore(blockId)
+  for (offset, size) in offsetsAndSizes:
+    yield blockData[offset ..< offset + size]
+
+iterator iterSmallBlockDataByIndices(db: FileDb, blockId: BlockId, indices: seq[FileIndex]): seq[byte] =
+  # TODO: The series of loops could be optimized into a single one by keeping the block around and acting on it instead
+  var offsetsAndSizes = newSeq[tuple[offset, size: int]]()
+  for i in indices:
+    let entry = db.entries[i]
+    if entry.blockId != blockId:
+      raiseAssert "Expected files from block " & $blockId & " but got " & $entry.blockId
+    if not entry.isInSmallBlock:
+      raiseAssert "Expected files from a small block"
+    offsetsAndSizes.add((offset : entry.blockOffset().int, size : entry.fileSize().int))
+  for data in db.iterOffsetsFromSmallBlock(blockId, offsetsAndSizes):
+    yield data
+
+# TODO: Should the file layer even handle this?
+proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: seq[string]) =
+  if not indices.len() == toPaths.len():
+    raiseAssert "Tried restoring entries to paths with mismatching counts"
+  # TODO: This could be replaced by a sort algorithm to save on allocations (sort by blockId)
+  var blockTable = initTable[BlockId, tuple[indices: seq[FileIndex], paths: seq[string]]]()
+  for i in 0 ..< indices.len():
+    var s = blockTable.mgetOrPut(db.entries[indices[i]].blockId, (indices : newSeq[FileIndex](), paths : newSeq[string]()))
+    s.indices.add(indices[i])
+    s.paths.add(toPaths[i])
+  for blockId, info in blockTable:
+    var i = 0
+    for data in db.iterSmallBlockDataByIndices(blockId, info.indices):
+      writeFile(info.paths[i], data)
+      inc i
+    doAssert i == info.paths.len()
 
 
 proc insertFile*(db: var FileDb, filePath: string): FileIndex =

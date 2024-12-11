@@ -30,6 +30,7 @@ type
     path*: ArchiveFilePath
 
   ArchiveEntry* = object
+    # TODO: Store info about whether or not the file is part of a small block once the custom format is ready
     name*: string
     intervals*: seq[ArchiveInterval]
     singles*: seq[ArchiveSingleFile]
