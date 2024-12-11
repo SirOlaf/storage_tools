@@ -201,14 +201,25 @@ template terminated*(p: var UpfileWriter, body: untyped): untyped =
   body
   p.terminator()
 
+
+# TODO: Don't manually define escape sequences
 proc upfileEscape*(x: string): string =
   x.multiReplace(
     ("$", "$d"),
     (" ", "$s"),
     ("(", "$p"),
-    (";", "$c")
+    (")", "$b"),
+    (";", "$c"),
   )
 
+proc upfileUnescape*(x: string): string =
+  x.multiReplace(
+    ("$d", "$"),
+    ("$s", " "),
+    ("$p", "("),
+    ("$b", ")"),
+    ("$c", ";"),
+  )
 
 
 when isMainModule:
