@@ -103,6 +103,7 @@ proc insertArchive(db: var Archivedb, folderPath: string, name: Option[string] =
   for empty in emptyDirs:
     archive.emptyDirs.add(empty)
 
+  # There may be runs of identical files and intervals may overlap, so they must not be filtered, only merged whenever possible
   var it = intervals.head
   while it != nil:
     var jt = it.next
