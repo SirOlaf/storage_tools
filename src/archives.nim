@@ -10,6 +10,7 @@ import std/[
 ]
 
 import files
+import upfiles
 
 
 const
@@ -32,6 +33,7 @@ type
   ArchiveEntry* = object
     # TODO: Store info about whether or not the file is part of a small block once the custom format is ready
     # Archive name is not stored here, it should be handled by the metadata layer
+    smallFiles*: HashSet[FileIndex]
     intervals*: seq[ArchiveInterval]
     singles*: seq[ArchiveSingleFile]
     emptyFiles*: seq[ArchiveFilePath]
@@ -63,6 +65,9 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
         archive.emptyFiles.add(filePath)
       else:
         let fileIndex = db.fileDb.insertFile(folderPath.joinPath(filePath))
+        if db.fileDb.entries[fileIndex].isInSmallBlock:
+          archive.smallFiles.incl(fileIndex)
+
         let node = newDoublyLinkedNode(filePath)
         if intervals.head == nil:
           intervals.append(newDoublyLinkedNode((
@@ -183,6 +188,59 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
 
 
 
+template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
+  x.writeRaw("i " & $a & "," & $b)
+  x.scope:
+    body
+
+proc path(x: var UpfileWriter, p: string) =
+  x.terminated:
+    x.writeRaw("p ")
+    x.writeRaw(upfileEscape(p))
+
+proc smallFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("s ")
+  x.path(p)
+
+proc bigFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("b ")
+  x.path(p)
+
+proc file(x: var UpfileWriter, p: string, small: bool) =
+  if small:
+    x.smallFile(p)
+  else:
+    x.bigFile(p)
+
+proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool) =
+  x.writeRaw("g ")
+  x.writeRaw($idx & " ")
+  x.file(p, small)
+
+proc emptyFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("e ")
+  x.path(p)
+
+
+proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
+  x.entity:
+    x.group "files":
+      for i in archive.intervals:
+        x.interval(i.a, i.b):
+          var j = i.a
+          for p in i.paths:
+            x.file(p, j in archive.smallFiles)
+            inc j
+      for s in archive.singles:
+        x.gapFile(s.index, s.path, s.index in archive.smallFiles)
+      for e in archive.emptyFiles:
+        x.emptyFile(e)
+    x.group "emptydirs":
+      for p in archive.emptyDirs:
+        x.path(p)
+
+
+
 when isMainModule:
   import std/[
     times,
@@ -204,8 +262,10 @@ when isMainModule:
   #discard archiveDb.insertArchive("testfiles2")
   echo "Insert took ", cpuTime() - insertStart
 
-  #for archive in archiveDb.archives:
-  #  echo (%* archive)
+  var writer = UpfileWriter(buff : newString(0), pretty : true)
+  for archive in archiveDb.archives:
+    writer.putArchive(archive)
+  echo writer.buff
 
   var restoreStart = cpuTime()
   removeDir("testfiles_out")
