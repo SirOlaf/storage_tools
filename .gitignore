@@ -12,3 +12,4 @@ out
 salt.txt
 pwhash.txt
 testfiles*
+out.json
