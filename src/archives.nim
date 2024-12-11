@@ -31,10 +31,10 @@ type
 
   ArchiveEntry* = object
     # TODO: Store info about whether or not the file is part of a small block once the custom format is ready
-    name*: string
+    # Archive name is not stored here, it should be handled by the metadata layer
     intervals*: seq[ArchiveInterval]
     singles*: seq[ArchiveSingleFile]
-    emptyPaths*: seq[ArchiveFilePath]
+    emptyFiles*: seq[ArchiveFilePath]
     emptyDirs*: seq[ArchiveDirPath]
 
   ArchiveDb* = object
@@ -42,14 +42,12 @@ type
     archives: seq[ArchiveEntry]
 
 
-proc insertArchive(db: var Archivedb, folderPath: string, name: Option[string] = none[string]()): ArchiveIndex =
+proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
   if not dirExists(folderPath):
     raiseAssert "Invalid directory path"
   let folderPath = absolutePath(folderPath).strip(chars={'/'}, leading=false, trailing=true)
 
-  var archive = ArchiveEntry(
-    name : if name.isSome(): name.get() else: folderPath.splitPath().tail,
-  )
+  var archive = ArchiveEntry()
 
   var emptyDirs = initHashSet[string]()
   var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[string]]]()
@@ -62,7 +60,7 @@ proc insertArchive(db: var Archivedb, folderPath: string, name: Option[string] =
         if p in emptyDirs:
           emptyDirs.excl(p)
       if getFileSize(folderPath.joinPath(filePath)) == 0:
-        archive.emptyPaths.add(filePath)
+        archive.emptyFiles.add(filePath)
       else:
         let fileIndex = db.fileDb.insertFile(folderPath.joinPath(filePath))
         let node = newDoublyLinkedNode(filePath)
@@ -145,7 +143,51 @@ proc insertArchive(db: var Archivedb, folderPath: string, name: Option[string] =
   db.archives.add(archive)
 
 
+proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: string) =
+  let archive = db.archives[archiveIndex]
+  var createdDirs = initHashSet[string]()
+  template ensureDir(dir: string) =
+    if dir notin createdDirs:
+      for d in dir.parentDirs():
+        createdDirs.incl(d)
+    createDir(dir)
+
+  for x in archive.emptyDirs:
+    ensureDir toDir.joinPath(x)
+  for x in archive.emptyFiles:
+    ensureDir toDir.joinPath(x.parentDir())
+    writeFile(toDir.joinPath(x), "")
+    let f = open(toDir.joinPath(x), fmWrite)
+    f.close()
+
+  var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[string]())
+  for x in archive.singles:
+    ensureDir toDir.joinPath(x.path).parentDir()
+    if db.fileDb.entries[x.index].isInSmallBlock():
+      smallFiles.indices.add(x.index)
+      smallFiles.fullPaths.add(toDir.joinPath(x.path))
+    else:
+      db.fileDb.restoreBigFileFromStore(x.index, toDir.joinPath(x.path))
+
+  for x in archive.intervals:
+    for fileIndex in x.a .. x.b:
+      let i = fileIndex - x.a
+      ensureDir toDir.joinPath(x.paths[i]).parentDir()
+
+      if db.filedb.entries[fileIndex].isInSmallBlock():
+        smallFiles.indices.add(fileIndex)
+        smallFiles.fullPaths.add(toDir.joinPath(x.paths[i]))
+      else:
+        db.fileDb.restoreBigFileFromStore(fileIndex, toDir.joinPath(x.paths[i]))
+  db.fileDb.restoreSmallFilesFromStore(smallFiles.indices, smallFiles.fullPaths)
+
+
+
 when isMainModule:
+  import std/[
+    times,
+  ]
+
   var fileDb = openFileDb(
     "/tmp/storage_tools/db",
     "/tmp/storage_tools/db/store",
@@ -156,9 +198,19 @@ when isMainModule:
     fileDb : fileDb,
     archives : newSeq[ArchiveEntry](),
   )
-  echo archiveDb.insertArchive("testfiles")
-  echo archiveDb.insertArchive("testfiles2")
-  for archive in archiveDb.archives:
-    echo archive
+
+  var insertStart = cpuTime()
+  discard archiveDb.insertArchive("testfiles")
+  #discard archiveDb.insertArchive("testfiles2")
+  echo "Insert took ", cpuTime() - insertStart
+
+  #for archive in archiveDb.archives:
+  #  echo (%* archive)
+
+  var restoreStart = cpuTime()
+  removeDir("testfiles_out")
+  archiveDb.restoreArchive(0, "testfiles_out")
+
+  echo "Restore took ", cpuTime() - restoreStart
 
   #fileDb.save()

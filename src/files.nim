@@ -56,7 +56,7 @@ type
     finalSize: uint64
 
   FileDb* = object
-    entries: ptr array[dbSize, FileEntry]
+    entries*: ptr array[dbSize, FileEntry]
     entriesPointerSelfManaged: bool
     smallFileQueue: seq[SmallFileInfo]
     dbPath: string
@@ -201,18 +201,32 @@ iterator iterSmallBlockDataByIndices(db: FileDb, blockId: BlockId, indices: seq[
 proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: seq[string]) =
   if not indices.len() == toPaths.len():
     raiseAssert "Tried restoring entries to paths with mismatching counts"
-  # TODO: This could be replaced by a sort algorithm to save on allocations (sort by blockId)
+  # TODO: This could be replaced by a sort algorithm to save on allocations and indirection (sort by blockId)
   var blockTable = initTable[BlockId, tuple[indices: seq[FileIndex], paths: seq[string]]]()
   for i in 0 ..< indices.len():
-    var s = blockTable.mgetOrPut(db.entries[indices[i]].blockId, (indices : newSeq[FileIndex](), paths : newSeq[string]()))
-    s.indices.add(indices[i])
-    s.paths.add(toPaths[i])
+    let blockId = db.entries[indices[i]].blockId
+    if blockId notin blockTable:
+      blockTable[blockId] = (indices : @[indices[i]], paths : @[toPaths[i]])
+    else:
+      blockTable[blockId].indices.add(indices[i])
+      blockTable[blockId].paths.add(toPaths[i])
   for blockId, info in blockTable:
     var i = 0
     for data in db.iterSmallBlockDataByIndices(blockId, info.indices):
-      writeFile(info.paths[i], data)
+      if db.entries[info.indices[i]].isCompressed:
+        writeFile(info.paths[i], data.decompress())
+      else:
+        writeFile(info.paths[i], data)
       inc i
     doAssert i == info.paths.len()
+
+proc restoreBigFileFromStore*(db: FileDb, index: FileIndex, toPath: string) =
+  if db.entries[index].isInSmallBlock:
+    raiseAssert "Expected a file that isn't part of a small block"
+  if db.entries[index].isCompressed:
+    writeFile(toPath, db.loadBlockFromStore(db.entries[index].blockId).decompress())
+  else:
+    writeFile(toPath, db.loadBlockFromStore(db.entries[index].blockId))
 
 
 proc insertFile*(db: var FileDb, filePath: string): FileIndex =
@@ -298,8 +312,11 @@ proc commit*(db: var FileDb) =
     var pageOffset = 0u64
     for info in bucket[1]:
       let sourceData = readFile(info.sourcePath)
-      let outData = compress(sourceData.toOpenArrayByte(sourceData.low, sourceData.high))
-      copyMem(addr page[pageOffset], addr outData[0], outData.len())
+      if db.entries[info.index].isCompressed:
+        let outData = compress(sourceData.toOpenArrayByte(sourceData.low, sourceData.high))
+        copyMem(addr page[pageOffset], addr outData[0], outData.len())
+      else:
+        copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
 
       db.entries[info.index].rawBlockOffset = pageOffset.uint16
       db.entries[info.index].blockId = blockid
