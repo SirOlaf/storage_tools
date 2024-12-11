@@ -127,11 +127,9 @@ proc `fileSize=`(entry: var FileEntry, x: uint64) {.inline.} =
 
 
 proc searchNextBlockId(db: FileDb): BlockId =
-  var res = -1
   for i in 0 ..< dbSize:
     if db.entries[i].fileSize == 0:
-      return BlockId(res + 1)
-    res = i
+      return BlockId(i + 1)
   raiseAssert "Failed to find a block id"
 
 proc searchTailIndex(db: FileDb): FileIndex =

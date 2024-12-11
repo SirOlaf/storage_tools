@@ -96,6 +96,7 @@ proc deriveMasterKey*(password: string, salt: Salt): MasterKey =
   ) == 0
 
 proc deriveSubkey*(key: MasterKey, id: SubkeyId): CryptoKey =
+  assert id.int > 0
   doAssert crypto_secretstream_xchacha20poly1305_KEYBYTES() == crypto_kdf_keybytes_proc()
   result = default(Cryptokey)
   doAssert crypto_kdf_derive_from_key(
