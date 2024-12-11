@@ -156,12 +156,109 @@ proc parseUpfile*(data: ptr string): seq[Entity] =
 
 
 
+type
+  UpfileWriter* = object
+    buff*: string # TODO: Replace with a stream
+    pretty*: bool
+    indent: int
+    afterNewline: bool
+
+proc writeRaw*(p: var UpfileWriter, x: string) =
+  if p.pretty and p.afterNewline:
+    p.buff.add(repeat("    ", p.indent))
+    p.afterNewline = false
+  p.buff.add(x)
+
+proc newline*(p: var UpfileWriter, force: bool = false) =
+  if p.pretty or force:
+    p.writeRaw("\n")
+  p.afterNewline = true
+
+proc terminator*(p: var UpfileWriter) =
+  p.writeRaw(";")
+  if p.pretty:
+    p.newline()
+
+template scope*(p: var UpfileWriter, body: untyped): untyped =
+  p.writeRaw("(")
+  p.newline()
+  inc p.indent
+  body
+  dec p.indent
+  p.writeRaw(")")
+  p.newline()
+
+template entity*(p: var UpfileWriter, body: untyped): untyped =
+  p.scope:
+    body
+
+template group*(p: var UpfileWriter, name: string, body: untyped): untyped =
+  p.writeRaw(name)
+  p.scope:
+    body
+
+template terminated*(p: var UpfileWriter, body: untyped): untyped =
+  body
+  p.terminator()
+
+proc upfileEscape*(x: string): string =
+  x.multiReplace(
+    ("$", "$d"),
+    (" ", "$s"),
+    ("(", "$p"),
+    (";", "$c")
+  )
+
+
+
 when isMainModule:
   import std/[
     times,
   ]
 
-  var data = readFile("archives.upa")
+  let data = block:
+    template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
+      x.writeRaw("i " & $a & "," & $b)
+      x.scope:
+        body
+
+    proc path(x: var UpfileWriter, p: string) =
+      x.terminated:
+        x.writeRaw("p ")
+        x.writeRaw(upfileEscape(p))
+
+    proc smallFile(x: var UpfileWriter, p: string) =
+      x.writeRaw("s ")
+      x.path(p)
+
+    proc bigFile(x: var UpfileWriter, p: string) =
+      x.writeRaw("b ")
+      x.path(p)
+
+    template gapFile(x: var UpfileWriter, idx: int, body: untyped): untyped =
+      x.writeRaw("g ")
+      x.writeRaw($idx & " ")
+      body
+
+    proc emptyFile(x: var UpfileWriter, p: string) =
+      x.writeRaw("e ")
+      x.path(p)
+
+    var x = UpfileWriter(buff : newString(0), pretty : false)
+    x.entity:
+      x.group("files"):
+        x.interval(0, 3):
+          x.smallFile "some/relative/path"
+          x.smallFile "some/path with spaces.txt"
+          x.smallFile "a/pathwithdollars$andsemicolons;.txt"
+          x.bigFile "some/other/path"
+        x.gapFile(12, x.smallFile "small/file/in/a/gap.txt")
+        x.gapFile(15, x.bigFile "big/file/in/a/gap.txt")
+        x.emptyFile("empty/file.txt")
+      x.group("emptydirs"):
+        x.path "empty/dir/1"
+        x.path "empty/dir/2"
+    x.buff
 
   echo "Data size: ", data.len(), " | ", data.len().formatSize()
 
