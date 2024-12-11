@@ -180,7 +180,11 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
     sha256 = sha256(rawPtr.mem, rawPtr.size)
 
   if sha256 in db.knownHashes:
-    return
+    # TODO: Is linear scan fast enough?
+    for i in 0 ..< dbSize:
+      if db.entries[i].sha256 == sha256:
+        return i
+    raiseAssert "Hash is known but the associated file could not be found"
   db.knownHashes.incl(sha256)
 
   var compressedData = compress(cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1))
@@ -261,16 +265,15 @@ proc commit*(db: var FileDb) =
 
   reset db.smallFileQueue
 
-template transaction(db: var FileDb, body: untyped): untyped =
+template transaction*(db: var FileDb, body: untyped): untyped =
   body
   db.commit()
 
 
 
-proc openFileDb*(dbPath: string, password: string): FileDb =
+proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
   # TODO: Support multifile once above 1 million files
   let dbBuff = create(array[dbSize, FileEntry])
-  let storePath = joinPath(dbPath, "store")
   createDir(storePath)
 
   var
@@ -318,6 +321,7 @@ when isMainModule:
 
   var db = openFileDb(
     "/tmp/storage_tools/db",
+    "/tmp/storage_tools/db/store",
     "test",
   )
 
