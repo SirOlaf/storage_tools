@@ -139,6 +139,7 @@ proc insertArchive(db: var Archivedb, folderPath: string, name: Option[string] =
 
     it = it.next
 
+  result = db.archives.len().ArchiveIndex
   db.archives.add(archive)
 
 
