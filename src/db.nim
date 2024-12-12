@@ -32,7 +32,7 @@ proc openDb(dbPath: string, storePath: string, password: string, prettyUpfiles: 
     metacoreWriter : UpfileWriter(buff : metacoreBuff, pretty : prettyUpfiles),
   )
 
-proc insertArchive(db: var DbCtx, folderPath: string, name = none[string]()): ArchiveIndex =
+proc insertArchive(db: var DbCtx, folderPath: string, name = none[string](), extraMetadata = default(ArchiveExtraMetadata)): ArchiveIndex =
   let prevLen = db.archiveDb.archives.len()
   result = db.archiveDb.insertArchive(folderPath)
   if prevLen != db.archiveDb.archives.len():
@@ -40,14 +40,14 @@ proc insertArchive(db: var DbCtx, folderPath: string, name = none[string]()): Ar
       name : if name.isSome(): name.get() else: folderPath.Path.extractFilename().string,
       index : result,
       time : now().utc()
-    ))
+    ), extraMetadata)
   else:
     echo "Archive ", folderPath, " is a duplicate of ", result
 
 proc restoreArchive(db: var DbCtx, archiveIndex: ArchiveIndex, toDir: string) =
   db.archiveDb.restoreArchive(archiveIndex, toDir)
 
-iterator iterMetadata(db: DbCtx): ArchiveCoreMetadata =
+iterator iterMetadata(db: DbCtx): ArchiveMetadata =
   for x in iterUpfileEntities(addr db.metacoreWriter.buff):
     yield x.parseMetadata()
 
@@ -65,7 +65,14 @@ when isMainModule:
     "test",
     false,
   )
-  discard db.insertArchive("testfiles")
+  discard db.insertArchive(
+    "testfiles",
+    extraMetadata = ArchiveExtraMetadata(
+      version : some "1.0",
+      tags : some @["test", "a", "b", "c"],
+      custom : some "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.",
+    )
+  )
   removeDir("testfiles_out")
   db.restoreArchive(0, "testfiles_out")
 

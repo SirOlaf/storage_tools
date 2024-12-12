@@ -3,6 +3,7 @@
 import std/[
   times,
   strutils,
+  options,
 ]
 
 import archives
@@ -15,37 +16,73 @@ type
     index*: ArchiveIndex
     time*: DateTime
 
+  ArchiveExtraMetadata* = object
+    version*: Option[string]
+    tags*: Option[seq[string]]
+    custom*: Option[string]
+
+  ArchiveMetadata* = object
+    core*: ArchiveCoreMetadata
+    extra*: ArchiveExtraMetadata
+
 
 
 proc field(x: var UpfileWriter, name, value: string) =
   x.terminated:
     x.writeRaw upfileEscape(name) & " " & upfileEscape(value)
 
-proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata) =
+proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = default(ArchiveExtraMetadata)) =
   x.entity:
     x.group "metacore":
       x.field "name", data.name
       x.field "index", $data.index
       x.field "time", $data.time
+    if extra.version.isSome() or extra.tags.isSome() or extra.custom.isSome():
+      x.group "extra":
+        if extra.version.isSome():
+          x.field "version", extra.version.get()
+        if extra.tags.isSome():
+          x.group "tags":
+            for t in extra.tags.get():
+              x.terminated x.writeRaw(t.upfileEscape())
+        if extra.custom.isSome():
+          x.field "custom", extra.custom.get().upfileEscape()
 
-proc parseMetadata*(raw: upfiles.Node): ArchiveCoreMetadata =
-  result = ArchiveCoreMetadata()
-  doAssert raw.kids.len() == 1, "Invalid metadata entity, espected 1 child but got " & $raw.kids.len()
-  let groupNode = raw.kids[0]
-  doAssert $groupNode.kids[0].raw == "metacore", "Expected a metacore group, got " & $groupNode.kids[0].raw
-  for k in groupNode.kids[1].kids:
-    let
-      name = $k.kids[0].raw
-      value = $k.kids[1].raw
-    case name
-    of "name":
-      result.name = value
-    of "index":
-      result.index = value.parseInt().ArchiveIndex
-    of "time":
-      result.time = value.parseTime("yyyy-MM-dd'T'HH:mm:sszzz", utc()).utc()
+proc parseMetadata*(raw: upfiles.Node): ArchiveMetadata =
+  result = ArchiveMetadata()
+  for groupNode in raw.kids:
+    let groupName = $groupNode.kids[0].raw
+    if groupName == "metacore":
+      for k in groupNode.kids[1].kids:
+        let
+          name = $k.kids[0].raw
+          value = $k.kids[1].raw
+        case name
+        of "name":
+          result.core.name = value.upfileUnescape()
+        of "index":
+          result.core.index = value.upfileUnescape().parseInt().ArchiveIndex
+        of "time":
+          result.core.time = value.upfileUnescape().parseTime("yyyy-MM-dd'T'HH:mm:sszzz", utc()).utc()
+        else:
+          raiseAssert "Unexpected metacore field: " & name
+    elif groupName == "extra":
+      for k in groupNode.kids[1].kids:
+        let name = $k.kids[0].raw
+        case name
+        of "version":
+          result.extra.version = some ($k.kids[1].raw).upfileUnescape()
+        of "tags":
+          var tags = newSeq[string]()
+          for t in k.kids[1].kids:
+            tags.add($t.raw)
+          result.extra.tags = some tags
+        of "custom":
+          result.extra.custom = some upfileUnescape($k.kids[1].raw)
+        else:
+          raiseAssert "unexpected extra field: " & name
     else:
-      raiseAssert "Unexpected metacore field: " & name
+      raiseAssert "Unexpected metacore group: " & groupName
 
 
 when isMainModule:
