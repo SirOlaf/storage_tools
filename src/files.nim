@@ -196,11 +196,11 @@ iterator iterSmallBlockDataByIndices(db: FileDb, blockId: BlockId, indices: seq[
     yield data
 
 # TODO: Should the file layer even handle this?
-proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: seq[string]) =
+proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: seq[(string, set[FilePermission])]) =
   if not indices.len() == toPaths.len():
     raiseAssert "Tried restoring entries to paths with mismatching counts"
   # TODO: This could be replaced by a sort algorithm to save on allocations and indirection (sort by blockId)
-  var blockTable = initTable[BlockId, tuple[indices: seq[FileIndex], paths: seq[string]]]()
+  var blockTable = initTable[BlockId, tuple[indices: seq[FileIndex], paths: seq[(string, set[FilePermission])]]]()
   for i in 0 ..< indices.len():
     let blockId = db.entries[indices[i]].blockId
     if blockId notin blockTable:
@@ -212,19 +212,21 @@ proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: s
     var i = 0
     for data in db.iterSmallBlockDataByIndices(blockId, info.indices):
       if db.entries[info.indices[i]].isCompressed:
-        writeFile(info.paths[i], data.decompress())
+        writeFile(info.paths[i][0], data.decompress())
       else:
-        writeFile(info.paths[i], data)
+        writeFile(info.paths[i][0], data)
+      setFilePermissions(info.paths[i][0], info.paths[i][1])
       inc i
     doAssert i == info.paths.len()
 
-proc restoreBigFileFromStore*(db: FileDb, index: FileIndex, toPath: string) =
+proc restoreBigFileFromStore*(db: FileDb, index: FileIndex, toPath: string, perms: set[FilePermission]) =
   if db.entries[index].isInSmallBlock:
     raiseAssert "Expected a file that isn't part of a small block"
   if db.entries[index].isCompressed:
     writeFile(toPath, db.loadBlockFromStore(db.entries[index].blockId).decompress())
   else:
     writeFile(toPath, db.loadBlockFromStore(db.entries[index].blockId))
+  toPath.setFilePermissions(perms)
 
 
 proc insertFile*(db: var FileDb, filePath: string): FileIndex =

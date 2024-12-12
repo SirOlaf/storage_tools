@@ -6,6 +6,7 @@ import std/[
   lists,
   sequtils,
   sets,
+  tables,
 ]
 
 import files
@@ -17,8 +18,8 @@ const
 
 
 type
-  ArchiveFilePath* = string
-  ArchiveDirPath* = string
+  ArchiveFilePath* = (string, set[FilePermission])
+  ArchiveDirPath* = (string, set[FilePermission])
   ArchiveIndex* = uint64
 
   ArchiveInterval* = object
@@ -36,7 +37,8 @@ type
     intervals*: seq[ArchiveInterval]
     singles*: seq[ArchiveSingleFile]
     emptyFiles*: seq[ArchiveFilePath]
-    emptyDirs*: seq[ArchiveDirPath]
+    dirs*: seq[ArchiveDirPath]
+    #emptyDirs*: seq[ArchiveDirPath]
 
   ArchiveDb* = object
     fileDb*: FileDb
@@ -49,31 +51,33 @@ template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
   x.scope:
     body
 
-proc path(x: var UpfileWriter, p: string) =
-  x.terminated x.writeRaw(upfileEscape(p))
+proc path(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
+  x.terminated:
+    x.writeRaw(cast[int16](perms).toOct(3) & " ")
+    x.writeRaw(upfileEscape(p))
 
-proc smallFile(x: var UpfileWriter, p: string) =
+proc smallFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
   x.writeRaw("s ")
-  x.path(p)
+  x.path(p, perms)
 
-proc bigFile(x: var UpfileWriter, p: string) =
+proc bigFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
   x.writeRaw("b ")
-  x.path(p)
+  x.path(p, perms)
 
-proc file(x: var UpfileWriter, p: string, small: bool) =
+proc file(x: var UpfileWriter, p: string, small: bool, perms: set[FilePermission]) =
   if small:
-    x.smallFile(p)
+    x.smallFile(p, perms)
   else:
-    x.bigFile(p)
+    x.bigFile(p, perms)
 
-proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool) =
+proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool, perms: set[FilePermission]) =
   x.writeRaw("g ")
   x.writeRaw($idx & " ")
-  x.file(p, small)
+  x.file(p, small, perms)
 
-proc emptyFile(x: var UpfileWriter, p: string) =
+proc emptyFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
   x.writeRaw("e ")
-  x.path(p)
+  x.path(p, perms)
 
 proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
   x.entity:
@@ -83,16 +87,16 @@ proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
           x.interval(i.a, i.b):
             var j = i.a
             for p in i.paths:
-              x.file(p, j in archive.smallFiles)
+              x.file(p[0], j in archive.smallFiles, p[1])
               inc j
         for s in archive.singles:
-          x.gapFile(s.index, s.path, s.index in archive.smallFiles)
+          x.gapFile(s.index, s.path[0], s.index in archive.smallFiles, s.path[1])
         for e in archive.emptyFiles:
-          x.emptyFile(e)
-    if archive.emptyDirs.len() > 0:
-      x.group "emptydirs":
-        for p in archive.emptyDirs:
-          x.path(p)
+          x.emptyFile(e[0], e[1])
+    if archive.dirs.len() > 0:
+      x.group "dirs":
+        for p in archive.dirs:
+          x.path(p[0], p[1])
 
 
 proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
@@ -102,61 +106,60 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
 
   var archive = ArchiveEntry()
 
-  var emptyDirs = initHashSet[string]()
-  var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[string]]]()
+  var dirs = initTable[string, set[FilePermission]]()
+  var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[(string, set[FilePermission])]]]()
   db.fileDb.transaction:
     for dirPath in walkDirRec(folderPath, yieldFilter={pcDir}, relative=true, skipSpecial=true):
-      emptyDirs.incl(dirPath)
+      if dirPath notin dirs:
+        dirs[dirPath] = getFilePermissions(folderPath.joinPath(dirPath))
 
     for filePath in walkDirRec(folderPath, relative=true, skipSpecial=true):
-      for p in filePath.parentDirs():
-        if p in emptyDirs:
-          emptyDirs.excl(p)
+      let perms = getFilePermissions(folderPath.joinPath(filePath))
       if getFileSize(folderPath.joinPath(filePath)) == 0:
-        archive.emptyFiles.add(filePath)
+        archive.emptyFiles.add((filePath, perms))
       else:
         let fileIndex = db.fileDb.insertFile(folderPath.joinPath(filePath))
         if db.fileDb.entries[fileIndex].isInSmallBlock:
           archive.smallFiles.incl(fileIndex)
 
-        let node = newDoublyLinkedNode(filePath)
+        let node = newDoublyLinkedNode((filePath, perms))
         if intervals.head == nil:
           intervals.append(newDoublyLinkedNode((
             a : fileIndex,
             b : fileIndex,
-            paths : DoublyLinkedList[string](head : node, tail : node)
+            paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node)
           )))
         else:
           var it = intervals.head
           while it != nil:
             if fileIndex + 1 == it.value.a:
               it.value.a = fileIndex
-              it.value.paths.prepend(filePath)
+              it.value.paths.prepend((filePath, perms))
               break
             elif fileIndex - 1 == it.value.b:
               it.value.b = fileIndex
-              it.value.paths.append(filePath)
+              it.value.paths.append((filePath, perms))
               break
             it = it.next
           if it == nil:
             # Couldn't find an interval that works
             if fileIndex < intervals.head.value.a:
-              let node = newDoublyLinkedNode(filePath)
+              let node = newDoublyLinkedNode((filePath, perms))
               intervals.prepend(newDoublyLinkedNode((
                 a : fileIndex,
                 b : fileIndex,
-                paths : DoublyLinkedList[string](head : node, tail : node),
+                paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node),
               )))
             else:
-              let node = newDoublyLinkedNode(filePath)
+              let node = newDoublyLinkedNode((filePath, perms))
               intervals.append(newDoublyLinkedNode((
                 a : fileIndex,
                 b : fileIndex,
-                paths : DoublyLinkedList[string](head : node, tail : node),
+                paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node),
               )))
 
-  for empty in emptyDirs:
-    archive.emptyDirs.add(empty)
+  for d in dirs.pairs():
+    archive.dirs.add(d)
 
   # There may be runs of identical files and intervals may overlap, so they must not be filtered, only merged whenever possible
   var it = intervals.head
@@ -208,45 +211,43 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
 proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: string) =
   let archive = db.archives[archiveIndex]
   var createdDirs = initHashSet[string]()
-  template ensureDir(dir: string) =
-    if dir notin createdDirs:
-      for d in dir.parentDirs():
-        createdDirs.incl(d)
-    createDir(dir)
+  template ensureDir(dir: ArchiveDirPath) =
+    let p = toDir.joinPath(dir[0])
+    if p notin createdDirs:
+      for d in p.parentDirs():
+        createdDirs.incl(p)
+    createDir(p)
+    setFilePermissions(p, dir[1])
 
-  for x in archive.emptyDirs:
-    ensureDir toDir.joinPath(x)
+  for x in archive.dirs:
+    ensureDir x
   for x in archive.emptyFiles:
-    ensureDir toDir.joinPath(x.parentDir())
-    writeFile(toDir.joinPath(x), "")
-    let f = open(toDir.joinPath(x), fmWrite)
+    let f = open(toDir.joinPath(x[0]), fmWrite)
     f.close()
+    setFilePermissions(toDir.joinPath(x[0]), x[1])
 
-  var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[string]())
+  var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[(string, set[FilePermission])]())
   for x in archive.singles:
-    ensureDir toDir.joinPath(x.path).parentDir()
     if db.fileDb.entries[x.index].isInSmallBlock():
       smallFiles.indices.add(x.index)
-      smallFiles.fullPaths.add(toDir.joinPath(x.path))
+      smallFiles.fullPaths.add((toDir.joinPath(x.path[0]), x.path[1]))
     else:
-      db.fileDb.restoreBigFileFromStore(x.index, toDir.joinPath(x.path))
+      db.fileDb.restoreBigFileFromStore(x.index, toDir.joinPath(x.path[0]), x.path[1])
 
   for x in archive.intervals:
     for fileIndex in x.a .. x.b:
       let i = fileIndex - x.a
-      ensureDir toDir.joinPath(x.paths[i]).parentDir()
-
       if db.filedb.entries[fileIndex].isInSmallBlock():
         smallFiles.indices.add(fileIndex)
-        smallFiles.fullPaths.add(toDir.joinPath(x.paths[i]))
+        smallFiles.fullPaths.add((toDir.joinPath(x.paths[i][0]), x.paths[i][1]))
       else:
-        db.fileDb.restoreBigFileFromStore(fileIndex, toDir.joinPath(x.paths[i]))
+        db.fileDb.restoreBigFileFromStore(fileIndex, toDir.joinPath(x.paths[i][0]), x.paths[i][1])
   db.fileDb.restoreSmallFilesFromStore(smallFiles.indices, smallFiles.fullPaths)
 
 
 
-proc parsePath(node: upfiles.Node): string {.inline.} =
-  upfileUnescape($node.raw)
+proc parsePath(permNode, pathNode: upfiles.Node): (string, set[FilePermission]) {.inline.} =
+  (upfileUnescape($pathNode.raw), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
 
 proc parseInterval(node: upfiles.Node): (int, int) {.inline.} =
   let s = $node.raw
@@ -270,7 +271,7 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
           var interval = ArchiveInterval(a : ends[0], b : ends[1])
           for i in interval.a .. interval.b:
             let e = fieldNode.kids[2].kids[i - interval.a]
-            interval.paths.add(e.kids[1].parsePath())
+            interval.paths.add(parsePath(e.kids[1], e.kids[2]))
             if e.kids[0].parseIsSmall():
               result.smallFiles.incl(i)
           result.intervals.add(interval)
@@ -278,17 +279,17 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
           let idx = parseInt($fieldNode.kids[1].raw)
           result.singles.add(ArchiveSingleFile(
             index : idx,
-            path : $fieldNode.kids[3].raw
+            path : parsePath(fieldNode.kids[3], fieldNode.kids[4]),
           ))
           if fieldNode.kids[2].parseIsSmall():
             result.smallFiles.incl(idx)
         of "e":
-          result.emptyFiles.add(fieldnode.kids[1].parsePath())
+          result.emptyFiles.add(parsePath(fieldNode.kids[1], fieldNode.kids[2]))
         else:
           raiseAssert "Unknown file entry kind: " & $fieldNode.kids[0].raw
-    elif groupName == "emptydirs":
+    elif groupName == "dirs":
       for k in groupNode.kids[1].kids:
-        result.emptyDirs.add(k.parsePath)
+        result.dirs.add(parsePath(k.kids[0], k.kids[1]))
     else:
       raiseAssert "Unknown upfile group: " & groupName
 
