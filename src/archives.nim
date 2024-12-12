@@ -39,9 +39,9 @@ type
     emptyDirs*: seq[ArchiveDirPath]
 
   ArchiveDb* = object
-    fileDb: FileDb
-    archives: seq[ArchiveEntry]
-    writer: UpfileWriter
+    fileDb*: FileDb
+    archives*: seq[ArchiveEntry]
+    writer*: UpfileWriter
 
 
 template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
@@ -287,10 +287,10 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
     else:
       raiseAssert "Unknown upfile group: " & groupName
 
-proc parseNthArchiveInUpfile(data: ptr string, n: int): ArchiveEntry =
+proc parseNthArchiveInUpfile*(data: ptr string, n: int): ArchiveEntry =
   data.parseNthEntityInUpfile(n).parseArchive()
 
-iterator iterArchivesInUpfile(data: ptr string): ArchiveEntry =
+iterator iterArchivesInUpfile*(data: ptr string): ArchiveEntry =
   for ent in data.iterUpfileEntities():
     yield ent.parseArchive()
 

@@ -59,8 +59,8 @@ type
     entries*: ptr array[dbSize, FileEntry]
     entriesPointerSelfManaged: bool
     smallFileQueue: seq[SmallFileInfo]
-    dbPath: string
-    storePath: string # stored separately from dbPath in preparation for a detached usecase
+    dbPath*: string
+    storePath*: string # stored separately from dbPath in preparation for a detached usecase
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextBlockId: BlockId
     nextEntryIndex: FileIndex
@@ -367,7 +367,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
   for i in 0 ..< result.nextEntryIndex:
     result.knownHashes.incl(result.entries[i].sha256)
 
-proc save*(db: var FileDb) =
+proc save*(db: FileDb) =
   var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
   copyMem(addr outBuff[0], db.entries, sizeof(array[dbSize, FileEntry]))
   copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.salt.string[0], saltSize)

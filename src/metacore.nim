@@ -5,13 +5,14 @@ import std/[
   strutils,
 ]
 
+import archives
 import upfiles
 
 
 type
-  ArchiveCoreMetadata = object
+  ArchiveCoreMetadata* = object
     name*: string
-    index*: int
+    index*: ArchiveIndex
     time*: DateTime
 
 
@@ -40,7 +41,7 @@ proc parseMetadata*(raw: upfiles.Node): ArchiveCoreMetadata =
     of "name":
       result.name = value
     of "index":
-      result.index = value.parseInt()
+      result.index = value.parseInt().ArchiveIndex
     of "time":
       result.time = value.parseTime("yyyy-MM-dd'T'HH:mm:sszzz", utc()).utc()
     else:
