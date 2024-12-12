@@ -195,6 +195,11 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
 
     it = it.next
 
+  # TODO: Better equivalence check that doesn't rely on implementation details
+  for i in 0 ..< db.archives.len():
+    if db.archives[i] == archive:
+      return i.ArchiveIndex
+
   result = db.archives.len().ArchiveIndex
   db.archives.add(archive)
   db.writer.putArchive(archive)
