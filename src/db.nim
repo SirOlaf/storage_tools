@@ -27,7 +27,7 @@ proc openDb(dbPath: string, storePath: string, password: string, prettyUpfiles: 
     archiveDb : ArchiveDb(
       fileDb : openFileDb(dbPath, storePath, password),
       writer : UpfileWriter(buff : archiveBuff, pretty : prettyUpfiles),
-      archives : toSeq(iterArchivesInUpfile(addr archiveBuff))
+      archives : toSeq(iterArchivesInUpfile(addr archiveBuff))  # TODO: Don't store the parsed variant of archives, most operations only require zero or one
     ),
     metacoreWriter : UpfileWriter(buff : metacoreBuff, pretty : prettyUpfiles),
   )
@@ -65,7 +65,7 @@ when isMainModule:
     "test",
     false,
   )
-  discard db.insertArchive(
+  let insertedArchiveIdx = db.insertArchive(
     "testfiles",
     extraMetadata = ArchiveExtraMetadata(
       version : some "1.0",
@@ -74,7 +74,7 @@ when isMainModule:
     )
   )
   removeDir("testfiles_out")
-  db.restoreArchive(0, "testfiles_out")
+  db.restoreArchive(insertedArchiveIdx, "testfiles_out")
 
   for meta in db.iterMetadata():
     echo meta
