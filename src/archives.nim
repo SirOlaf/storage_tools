@@ -194,9 +194,7 @@ template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
     body
 
 proc path(x: var UpfileWriter, p: string) =
-  x.terminated:
-    x.writeRaw("p ")
-    x.writeRaw(upfileEscape(p))
+  x.terminated x.writeRaw(upfileEscape(p))
 
 proc smallFile(x: var UpfileWriter, p: string) =
   x.writeRaw("s ")
@@ -224,21 +222,77 @@ proc emptyFile(x: var UpfileWriter, p: string) =
 
 proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
   x.entity:
-    x.group "files":
-      for i in archive.intervals:
-        x.interval(i.a, i.b):
-          var j = i.a
-          for p in i.paths:
-            x.file(p, j in archive.smallFiles)
-            inc j
-      for s in archive.singles:
-        x.gapFile(s.index, s.path, s.index in archive.smallFiles)
-      for e in archive.emptyFiles:
-        x.emptyFile(e)
-    x.group "emptydirs":
-      for p in archive.emptyDirs:
-        x.path(p)
+    if archive.intervals.len() > 0 or archive.singles.len() > 0 or archive.emptyFiles.len() > 0:
+      x.group "files":
+        for i in archive.intervals:
+          x.interval(i.a, i.b):
+            var j = i.a
+            for p in i.paths:
+              x.file(p, j in archive.smallFiles)
+              inc j
+        for s in archive.singles:
+          x.gapFile(s.index, s.path, s.index in archive.smallFiles)
+        for e in archive.emptyFiles:
+          x.emptyFile(e)
+    if archive.emptyDirs.len() > 0:
+      x.group "emptydirs":
+        for p in archive.emptyDirs:
+          x.path(p)
 
+
+proc parsePath(node: upfiles.Node): string {.inline.} =
+  upfileUnescape($node.raw)
+
+proc parseInterval(node: upfiles.Node): (int, int) {.inline.} =
+  let s = $node.raw
+  let comma = s.find(",")
+  (parseInt(s[0 ..< comma]), parseInt(s[comma + 1 ..< s.len()]))
+
+proc parseIsSmall(node: upfiles.Node): bool {.inline.} =
+  let x = $node.raw
+  assert x in "sb", x
+  x == "s"
+
+proc parseArchive(raw: upfiles.Node): ArchiveEntry =
+  result = ArchiveEntry()
+  for groupNode in raw.kids:
+    let groupName = $groupNode.kids[0].raw
+    if groupName == "files":
+      for fieldNode in groupNode.kids[1].kids:
+        case $fieldNode.kids[0].raw
+        of "i":
+          let ends = fieldNode.kids[1].parseInterval()
+          var interval = ArchiveInterval(a : ends[0], b : ends[1])
+          for i in interval.a .. interval.b:
+            let e = fieldNode.kids[2].kids[i - interval.a]
+            interval.paths.add(e.kids[1].parsePath())
+            if e.kids[0].parseIsSmall():
+              result.smallFiles.incl(i)
+          result.intervals.add(interval)
+        of "g":
+          let idx = parseInt($fieldNode.kids[1].raw)
+          result.singles.add(ArchiveSingleFile(
+            index : idx,
+            path : $fieldNode.kids[3].raw
+          ))
+          if fieldNode.kids[2].parseIsSmall():
+            result.smallFiles.incl(idx)
+        of "e":
+          result.emptyFiles.add(fieldnode.kids[1].parsePath())
+        else:
+          raiseAssert "Unknown file entry kind: " & $fieldNode.kids[0].raw
+    elif groupName == "emptydirs":
+      for k in groupNode.kids[1].kids:
+        result.emptyDirs.add(k.parsePath)
+    else:
+      raiseAssert "Unknown upfile group: " & groupName
+
+proc parseNthArchiveInUpfile(data: ptr string, n: int): ArchiveEntry =
+  data.parseNthEntityInUpfile(n).parseArchive()
+
+iterator iterArchivesInUpfile(data: ptr string): ArchiveEntry =
+  for ent in data.iterUpfileEntities():
+    yield ent.parseArchive()
 
 
 when isMainModule:
@@ -259,18 +313,22 @@ when isMainModule:
 
   var insertStart = cpuTime()
   discard archiveDb.insertArchive("testfiles")
-  #discard archiveDb.insertArchive("testfiles2")
+  discard archiveDb.insertArchive("testfiles2")
+  discard archiveDb.insertArchive("testfilesempty")
   echo "Insert took ", cpuTime() - insertStart
 
   var writer = UpfileWriter(buff : newString(0), pretty : true)
   for archive in archiveDb.archives:
     writer.putArchive(archive)
-  echo writer.buff
+  writeFile("testarchives.upa", writer.buff)
 
-  var restoreStart = cpuTime()
-  removeDir("testfiles_out")
-  archiveDb.restoreArchive(0, "testfiles_out")
+  echo parseNthArchiveInUpfile(addr writer.buff, 2)
 
-  echo "Restore took ", cpuTime() - restoreStart
+  when true:
+    var restoreStart = cpuTime()
+    removeDir("testfiles_out")
+    archiveDb.restoreArchive(0, "testfiles_out")
+
+    echo "Restore took ", cpuTime() - restoreStart
 
   #fileDb.save()

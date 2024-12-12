@@ -96,12 +96,12 @@ proc parseScope*(p: var UpfileParser): Node =
         parts.add(Node(raw : p.parseAnyNonTerm()))
       if p.peekChar() == '(':
         parts.add(p.parseScope())
-      elif p.peekChar() == ';':
-        inc p.i
       kids.add(Node(
         raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[partsStart]), len : p.i - partsStart),
         kids : parts,
       ))
+      if p.peekChar() == ';':
+        inc p.i
 
   Node(
     raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[scopeStart]), len : p.i - scopeStart),
@@ -137,6 +137,11 @@ iterator iterUpfileEntityOffsets*(data: ptr string): EntityOffset =
     let x = p.skipScope()
     yield EntityOffset(cast[uint](x.p) - cast[uint](addr data[0]))
 
+iterator iterUpfileEntities*(data: ptr string): Entity =
+  var p = UpfileParser(buff : data, i : 0)
+  while not p.atEof():
+    yield p.parseEntity()
+
 proc countUpfileEntities*(data: ptr string): int =
   result = 0
   for _ in data.iterUpfileEntityOffsets():
@@ -150,10 +155,8 @@ proc parseNthEntityInUpfile*(data: ptr string, n: int): Entity =
 
 proc parseUpfile*(data: ptr string): seq[Entity] =
   result = newSeq[Node]()
-  var p = UpfileParser(buff : data, i : 0)
-  while not p.atEof():
-    result.add p.parseEntity()
-
+  for ent in iterUpfileEntities(data):
+    result.add ent
 
 
 type
