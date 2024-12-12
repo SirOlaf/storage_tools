@@ -42,6 +42,58 @@ type
   ArchiveDb* = object
     fileDb: FileDb
     archives: seq[ArchiveEntry]
+    writer: UpfileWriter
+
+
+template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
+  x.writeRaw("i " & $a & "," & $b)
+  x.scope:
+    body
+
+proc path(x: var UpfileWriter, p: string) =
+  x.terminated x.writeRaw(upfileEscape(p))
+
+proc smallFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("s ")
+  x.path(p)
+
+proc bigFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("b ")
+  x.path(p)
+
+proc file(x: var UpfileWriter, p: string, small: bool) =
+  if small:
+    x.smallFile(p)
+  else:
+    x.bigFile(p)
+
+proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool) =
+  x.writeRaw("g ")
+  x.writeRaw($idx & " ")
+  x.file(p, small)
+
+proc emptyFile(x: var UpfileWriter, p: string) =
+  x.writeRaw("e ")
+  x.path(p)
+
+proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
+  x.entity:
+    if archive.intervals.len() > 0 or archive.singles.len() > 0 or archive.emptyFiles.len() > 0:
+      x.group "files":
+        for i in archive.intervals:
+          x.interval(i.a, i.b):
+            var j = i.a
+            for p in i.paths:
+              x.file(p, j in archive.smallFiles)
+              inc j
+        for s in archive.singles:
+          x.gapFile(s.index, s.path, s.index in archive.smallFiles)
+        for e in archive.emptyFiles:
+          x.emptyFile(e)
+    if archive.emptyDirs.len() > 0:
+      x.group "emptydirs":
+        for p in archive.emptyDirs:
+          x.path(p)
 
 
 proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
@@ -146,6 +198,7 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
 
   result = db.archives.len().ArchiveIndex
   db.archives.add(archive)
+  db.writer.putArchive(archive)
 
 
 proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: string) =
@@ -186,58 +239,6 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
         db.fileDb.restoreBigFileFromStore(fileIndex, toDir.joinPath(x.paths[i]))
   db.fileDb.restoreSmallFilesFromStore(smallFiles.indices, smallFiles.fullPaths)
 
-
-
-template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
-  x.writeRaw("i " & $a & "," & $b)
-  x.scope:
-    body
-
-proc path(x: var UpfileWriter, p: string) =
-  x.terminated x.writeRaw(upfileEscape(p))
-
-proc smallFile(x: var UpfileWriter, p: string) =
-  x.writeRaw("s ")
-  x.path(p)
-
-proc bigFile(x: var UpfileWriter, p: string) =
-  x.writeRaw("b ")
-  x.path(p)
-
-proc file(x: var UpfileWriter, p: string, small: bool) =
-  if small:
-    x.smallFile(p)
-  else:
-    x.bigFile(p)
-
-proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool) =
-  x.writeRaw("g ")
-  x.writeRaw($idx & " ")
-  x.file(p, small)
-
-proc emptyFile(x: var UpfileWriter, p: string) =
-  x.writeRaw("e ")
-  x.path(p)
-
-
-proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
-  x.entity:
-    if archive.intervals.len() > 0 or archive.singles.len() > 0 or archive.emptyFiles.len() > 0:
-      x.group "files":
-        for i in archive.intervals:
-          x.interval(i.a, i.b):
-            var j = i.a
-            for p in i.paths:
-              x.file(p, j in archive.smallFiles)
-              inc j
-        for s in archive.singles:
-          x.gapFile(s.index, s.path, s.index in archive.smallFiles)
-        for e in archive.emptyFiles:
-          x.emptyFile(e)
-    if archive.emptyDirs.len() > 0:
-      x.group "emptydirs":
-        for p in archive.emptyDirs:
-          x.path(p)
 
 
 proc parsePath(node: upfiles.Node): string {.inline.} =
@@ -309,6 +310,7 @@ when isMainModule:
   var archiveDb = ArchiveDb(
     fileDb : fileDb,
     archives : newSeq[ArchiveEntry](),
+    writer : UpfileWriter(buff : newString(0), pretty : true),
   )
 
   var insertStart = cpuTime()
@@ -317,12 +319,9 @@ when isMainModule:
   discard archiveDb.insertArchive("testfilesempty")
   echo "Insert took ", cpuTime() - insertStart
 
-  var writer = UpfileWriter(buff : newString(0), pretty : true)
-  for archive in archiveDb.archives:
-    writer.putArchive(archive)
-  writeFile("testarchives.upa", writer.buff)
+  writeFile("testarchives.upa", archiveDb.writer.buff)
 
-  echo parseNthArchiveInUpfile(addr writer.buff, 2)
+  echo parseNthArchiveInUpfile(addr archiveDb.writer.buff, 2)
 
   when true:
     var restoreStart = cpuTime()
