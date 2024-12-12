@@ -63,7 +63,7 @@ when isMainModule:
     "/tmp/storage_tools/db",
     "/tmp/storage_tools/db/store",
     "test",
-    true,
+    false,
   )
   discard db.insertArchive(
     "testfiles",
