@@ -3,7 +3,6 @@ import std/[
   os,
   strutils,
   options,
-  algorithm,
   lists,
   sequtils,
   sets,
