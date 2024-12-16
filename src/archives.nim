@@ -54,7 +54,7 @@ template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
 proc path(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
   x.terminated:
     x.writeRaw(cast[int16](perms).toOct(3) & " ")
-    x.writeRaw(upfileEscape(p))
+    x.putStr(p)
 
 proc smallFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
   x.writeRaw("s ")
@@ -247,7 +247,7 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
 
 
 proc parsePath(permNode, pathNode: upfiles.Node): (string, set[FilePermission]) {.inline.} =
-  (upfileUnescape($pathNode.raw), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
+  (upfileUnescape(UpfileStr($pathNode.raw)), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
 
 proc parseInterval(node: upfiles.Node): (int, int) {.inline.} =
   let s = $node.raw

@@ -29,7 +29,7 @@ type
 
 proc field(x: var UpfileWriter, name, value: string) =
   x.terminated:
-    x.writeRaw upfileEscape(name) & " " & upfileEscape(value)
+    x.writeRaw upfileEscape(name).string & " " & upfileEscape(value).string
 
 proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = default(ArchiveExtraMetadata)) =
   x.entity:
@@ -44,9 +44,9 @@ proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = defaul
         if extra.tags.isSome():
           x.group "tags":
             for t in extra.tags.get():
-              x.terminated x.writeRaw(t.upfileEscape())
+              x.terminated x.putStr(t)
         if extra.custom.isSome():
-          x.field "custom", extra.custom.get().upfileEscape()
+          x.field "custom", extra.custom.get()
 
 proc parseMetadata*(raw: upfiles.Node): ArchiveMetadata =
   result = ArchiveMetadata()
@@ -56,7 +56,7 @@ proc parseMetadata*(raw: upfiles.Node): ArchiveMetadata =
       for k in groupNode.kids[1].kids:
         let
           name = $k.kids[0].raw
-          value = $k.kids[1].raw
+          value = UpfileStr($k.kids[1].raw)
         case name
         of "name":
           result.core.name = value.upfileUnescape()
@@ -71,14 +71,14 @@ proc parseMetadata*(raw: upfiles.Node): ArchiveMetadata =
         let name = $k.kids[0].raw
         case name
         of "version":
-          result.extra.version = some ($k.kids[1].raw).upfileUnescape()
+          result.extra.version = some UpfileStr($k.kids[1].raw).upfileUnescape()
         of "tags":
           var tags = newSeq[string]()
           for t in k.kids[1].kids:
-            tags.add($t.raw)
+            tags.add(upfileUnescape(UpfileStr($t.raw)))
           result.extra.tags = some tags
         of "custom":
-          result.extra.custom = some upfileUnescape($k.kids[1].raw)
+          result.extra.custom = some upfileUnescape(UpfileStr($k.kids[1].raw))
         else:
           raiseAssert "unexpected extra field: " & name
     else:
@@ -91,8 +91,10 @@ when isMainModule:
     name : "test",
     index : 0,
     time : now().utc(),
+  ), ArchiveExtraMetadata(
+    tags : some @["$test"],
+    custom : some "test $;()"
   ))
 
-  echo parseNthEntityInUpfile(writer.buff, 0).parseMetadata()
-
   echo writer.buff
+  echo parseNthEntityInUpfile(writer.buff, 0).parseMetadata()

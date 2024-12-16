@@ -10,6 +10,7 @@ const
 
 type
   EntityOffset* = int
+  UpfileStr* = distinct string
 
   StrSlice* = object
     p*: ptr UncheckedArray[char]
@@ -181,11 +182,35 @@ type
     indent: int
     afterNewline: bool
 
+
+# TODO: Don't manually define escape sequences
+proc upfileEscape*(x: string): UpfileStr =
+  x.multiReplace(
+    ("$", "$d"),
+    (" ", "$s"),
+    ("(", "$p"),
+    (")", "$b"),
+    (";", "$c"),
+  ).UpfileStr
+
+proc upfileUnescape*(x: UpfileStr): string =
+  x.string.multiReplace(
+    ("$d", "$"),
+    ("$s", " "),
+    ("$p", "("),
+    ("$b", ")"),
+    ("$c", ";"),
+  )
+
+
 proc writeRaw*(p: var UpfileWriter, x: string) =
   if p.pretty and p.afterNewline:
     p.buff.add(repeat("    ", p.indent))
     p.afterNewline = false
   p.buff.add(x)
+
+proc putStr*(p: var UpfileWriter, x: string) =
+  p.writeRaw upfileEscape(x).string
 
 proc newline*(p: var UpfileWriter, force: bool = false) =
   if p.pretty or force:
@@ -220,25 +245,6 @@ template terminated*(p: var UpfileWriter, body: untyped): untyped =
   p.terminator()
 
 
-# TODO: Don't manually define escape sequences
-proc upfileEscape*(x: string): string =
-  x.multiReplace(
-    ("$", "$d"),
-    (" ", "$s"),
-    ("(", "$p"),
-    (")", "$b"),
-    (";", "$c"),
-  )
-
-proc upfileUnescape*(x: string): string =
-  x.multiReplace(
-    ("$d", "$"),
-    ("$s", " "),
-    ("$p", "("),
-    ("$b", ")"),
-    ("$c", ";"),
-  )
-
 
 when isMainModule:
   import std/[
@@ -254,7 +260,7 @@ when isMainModule:
     proc path(x: var UpfileWriter, p: string) =
       x.terminated:
         x.writeRaw("p ")
-        x.writeRaw(upfileEscape(p))
+        x.putStr(p)
 
     proc smallFile(x: var UpfileWriter, p: string) =
       x.writeRaw("s ")
