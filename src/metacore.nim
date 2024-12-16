@@ -93,6 +93,6 @@ when isMainModule:
     time : now().utc(),
   ))
 
-  echo parseNthEntityInUpfile(addr writer.buff, 0).parseMetadata()
+  echo parseNthEntityInUpfile(writer.buff, 0).parseMetadata()
 
   echo writer.buff

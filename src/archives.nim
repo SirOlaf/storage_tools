@@ -293,10 +293,10 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
     else:
       raiseAssert "Unknown upfile group: " & groupName
 
-proc parseNthArchiveInUpfile*(data: ptr string, n: int): ArchiveEntry =
+proc parseNthArchiveInUpfile*(data: openArray[char], n: int): ArchiveEntry =
   data.parseNthEntityInUpfile(n).parseArchive()
 
-iterator iterArchivesInUpfile*(data: ptr string): ArchiveEntry =
+iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =
   for ent in data.iterUpfileEntities():
     yield ent.parseArchive()
 
@@ -326,7 +326,7 @@ when isMainModule:
 
   writeFile("testarchives.upa", archiveDb.writer.buff)
 
-  echo parseNthArchiveInUpfile(addr archiveDb.writer.buff, 2)
+  echo parseNthArchiveInUpfile(archiveDb.writer.buff, 2)
 
   when true:
     var restoreStart = cpuTime()

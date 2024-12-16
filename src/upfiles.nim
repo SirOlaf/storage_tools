@@ -11,13 +11,9 @@ const
 type
   EntityOffset* = int
 
-  UpfileParser* = object # TODO: Replace parser with something like a slice
-    i*: int
-    buff*: ptr string
-
   StrSlice* = object
     p*: ptr UncheckedArray[char]
-    len*: int
+    z: ptr UncheckedArray[char]
 
   Node* = object
     raw*: StrSlice
@@ -25,135 +21,154 @@ type
   Entity* = Node
 
 
+proc len*(x: StrSlice): int =
+  cast[int](x.z) - cast[int](x.p)
+
 proc `$`*(x: StrSlice): string =
   result = newString(x.len)
   copyMem(addr result[0], x.p, x.len)
 
+proc inc(x: var StrSlice) =
+  x.p = cast[ptr UncheckedArray[char]](addr x.p[1])
 
-proc atEof*(p: UpfileParser): bool {.inline.} =
-  p.i >= p.buff[].len() - 1
+proc atEof*(p: StrSlice): bool {.inline.} =
+  p.len == 0
 
-proc skipWhitespace*(p: var UpfileParser) =
-  while p.buff[p.i].isSpaceAscii():
-    inc p.i
 
-proc expectChar*(p: var UpfileParser, c: char) =
+proc toSlice*(buff: ptr UncheckedArray[char], len: int): StrSlice =
+  StrSlice(p : buff, z : cast[ptr[UncheckedArray[char]]](cast[int](buff) + len))
+
+proc toSlice*(buff: openArray[char]): StrSlice =
+  toSlice(cast[ptr UncheckedArray[char]](addr buff[0]), buff.len())
+
+
+proc skipWhitespace*(p: var StrSlice) =
+  while p.p[0].isSpaceAscii():
+    inc p
+
+proc expectChar*(p: var StrSlice, c: char) =
   p.skipWhitespace()
-  if p.buff[p.i] != c:
-    raiseAssert "Expected " & c & " got " & p.buff[p.i] & " offset: " & $p.i
-  inc p.i
+  if p.p[0] != c:
+    raiseAssert "Expected " & c & " got " & p.p[0]
+  inc p
 
-proc peekChar*(p: var UpfileParser): char =
+proc peekChar*(p: var StrSlice): char =
   p.skipWhitespace()
-  p.buff[p.i]
+  p.p[0]
 
 
-template withParens*(p: var UpfileParser, body: untyped): untyped =
+template withParens*(p: var StrSlice, body: untyped): untyped =
   p.expectChar('(')
   body
   p.expectChar(')')
 
 
-proc parseAsciiWord*(p: var UpfileParser): StrSlice =
+proc parseAsciiWord*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
-  let a = p.i
-  while p.buff[p.i].isAlphaAscii():
-    inc p.i
-  StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[a]), len : p.i - a)
+  result = StrSlice(p : p.p)
+  while p.p[0].isAlphaAscii():
+    inc p
+  result.z = p.p
 
-proc parseAnyNonTerm*(p: var UpfileParser): StrSlice =
+proc parseAnyNonTerm*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
-  let a = p.i
-  while not p.buff[p.i].isSpaceAscii() and p.buff[p.i] notin TermChars:
-    inc p.i
-  StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[a]), len : p.i - a)
+  result = StrSlice(p : p.p)
+  while not p.p[0].isSpaceAscii() and p.p[0] notin TermChars:
+    inc p
+  result.z = p.p
 
-proc skipScope*(p: var UpfileParser): StrSlice =
+proc skipScope*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
-  let scopeStart = p.i
+  result = StrSlice(p : p.p)
   p.expectChar('(')
   var depth = 1
   while true:
-    if p.buff[p.i] == '(':
+    if p.p[0] == '(':
       inc depth
-    elif p.buff[p.i] == ')':
+    elif p.p[0] == ')':
       dec depth
       if depth == 0:
         break
-    inc p.i
+    inc p
+  result.z = p.p
   p.expectChar(')')
-  StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[scopeStart]), len : p.i - scopeStart)
 
-proc parseScope*(p: var UpfileParser): Node =
+proc parseScope*(p: var StrSlice): Node =
   p.skipWhitespace()
-  let scopeStart = p.i
+  var raw = StrSlice(p : p.p)
   var kids = newSeq[Node]()
   p.withParens:
     while p.peekChar() != ')':
-      var partsStart = p.i
+      var partsRaw = StrSlice(p : p.p)
       var parts = newSeq[Node]()
       while p.peekChar() notin TermChars:
         parts.add(Node(raw : p.parseAnyNonTerm()))
       if p.peekChar() == '(':
         parts.add(p.parseScope())
+      partsRaw.z = p.p
       kids.add(Node(
-        raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[partsStart]), len : p.i - partsStart),
+        raw : partsRaw,
         kids : parts,
       ))
       if p.peekChar() == ';':
-        inc p.i
+        inc p
 
+  raw.z = p.p
   Node(
-    raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[scopeStart]), len : p.i - scopeStart),
+    raw : raw,
     kids : kids,
   )
 
-proc parseGroup*(p: var UpfileParser): Node =
+proc parseGroup*(p: var StrSlice): Node =
   p.skipWhitespace()
-  let groupStart = p.i
+  var raw = StrSlice(p : p.p)
   let name = p.parseAsciiWord()
   let scope = p.parseScope()
+  raw.z = p.p
   Node(
-    raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[groupStart]), len : p.i - groupStart),
+    raw : raw,
     kids : @[Node(raw : name), scope]
   )
 
-proc parseEntity*(p: var UpfileParser): Entity =
+proc parseEntity*(p: var StrSlice): Entity =
   p.skipWhitespace()
-  var entityStart = p.i
+  var raw = StrSlice(p : p.p)
   var groups = newSeq[Node]()
   p.withParens:
     while p.peekChar() != ')':
       groups.add(p.parseGroup())
+  raw.z = p.p
   Node(
-    raw : StrSlice(p : cast[ptr UncheckedArray[char]](addr p.buff[entityStart]), len : p.i - entityStart),
+    raw : raw,
     kids : groups,
   )
 
-iterator iterUpfileEntityOffsets*(data: ptr string): EntityOffset =
-  # TODO: This could use slices instead
-  var p = UpfileParser(buff : data, i : 0)
-  while not p.atEof():
-    let x = p.skipScope()
-    yield EntityOffset(cast[uint](x.p) - cast[uint](addr data[0]))
+iterator iterUpfileEntityOffsets*(data: openArray[char]): EntityOffset =
+  if data.len() > 0:
+    var p = data.toSlice()
+    while not p.atEof():
+      let x = p.skipScope()
+      yield EntityOffset(cast[uint](x.p) - cast[uint](addr data[0]))
 
-iterator iterUpfileEntities*(data: ptr string): Entity =
-  var p = UpfileParser(buff : data, i : 0)
-  while not p.atEof():
-    yield p.parseEntity()
+iterator iterUpfileEntities*(data: openArray[char]): Entity =
+  if data.len() > 0:
+    var p = data.toSlice()
+    while not p.atEof():
+      yield p.parseEntity()
 
-proc countUpfileEntities*(data: ptr string): int =
+proc countUpfileEntities*(data: openArray[char]): int =
   result = 0
   for _ in data.iterUpfileEntityOffsets():
     inc result
 
-proc parseNthEntityInUpfile*(data: ptr string, n: int): Entity =
-  var p = UpfileParser(buff : data, i : 0)
+proc parseNthEntityInUpfile*(data: openArray[char], n: int): Entity =
+  doAssert data.len() > 0
+  var p = data.toSlice()
   for i in 0 ..< n:
     discard p.skipScope()
   p.parseEntity()
 
-proc parseUpfile*(data: ptr string): seq[Entity] =
+proc parseUpfile*(data: openArray[char]): seq[Entity] =
   result = newSeq[Node]()
   for ent in iterUpfileEntities(data):
     result.add ent
@@ -230,7 +245,7 @@ when isMainModule:
     times,
   ]
 
-  let data = block:
+  var data = block:
     template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
       x.writeRaw("i " & $a & "," & $b)
       x.scope:
@@ -274,14 +289,17 @@ when isMainModule:
         x.path "empty/dir/2"
     x.buff
 
+  while data.len() < 1_000_000_000:
+    data &= data
+
   echo "Data size: ", data.len(), " | ", data.len().formatSize()
+  let count = countUpfileEntities(data)
+  echo "Entity count: ", count
 
   let parseStart = cpuTime()
-  #let x = parseUpfile(addr data)
-  let x = parseNthEntityInUpfile(addr data, 0)
+  #let x = parseUpfile(data)
+  let x = parseNthEntityInUpfile(data, count - 1)
   echo x.raw
-
-  echo "Entity count: ", countUpfileEntities(addr data)
 
   #echo x.raw
   echo "Took ", cpuTime() - parseStart

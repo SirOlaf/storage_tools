@@ -27,7 +27,7 @@ proc openDb(dbPath: string, storePath: string, password: string, prettyUpfiles: 
     archiveDb : ArchiveDb(
       fileDb : openFileDb(dbPath, storePath, password),
       writer : UpfileWriter(buff : archiveBuff, pretty : prettyUpfiles),
-      archives : toSeq(iterArchivesInUpfile(addr archiveBuff))  # TODO: Don't store the parsed variant of archives, most operations only require zero or one
+      archives : toSeq(iterArchivesInUpfile(archiveBuff))  # TODO: Don't store the parsed variant of archives, most operations only require zero or one
     ),
     metacoreWriter : UpfileWriter(buff : metacoreBuff, pretty : prettyUpfiles),
   )
@@ -48,7 +48,7 @@ proc restoreArchive(db: var DbCtx, archiveIndex: ArchiveIndex, toDir: string) =
   db.archiveDb.restoreArchive(archiveIndex, toDir)
 
 iterator iterMetadata(db: DbCtx): ArchiveMetadata =
-  for x in iterUpfileEntities(addr db.metacoreWriter.buff):
+  for x in iterUpfileEntities(db.metacoreWriter.buff):
     yield x.parseMetadata()
 
 
