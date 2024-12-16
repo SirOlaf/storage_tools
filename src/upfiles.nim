@@ -13,7 +13,7 @@ type
 
   StrSlice* = object
     p*: ptr UncheckedArray[char]
-    z: ptr UncheckedArray[char]
+    z: ptr UncheckedArray[char] # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
 
   Node* = object
     raw*: StrSlice
@@ -21,24 +21,24 @@ type
   Entity* = Node
 
 
-proc len*(x: StrSlice): int =
+proc len*(x: StrSlice): int {.inline.} =
   cast[int](x.z) - cast[int](x.p)
 
 proc `$`*(x: StrSlice): string =
   result = newString(x.len)
   copyMem(addr result[0], x.p, x.len)
 
-proc inc(x: var StrSlice) =
+proc inc(x: var StrSlice) {.inline.} =
   x.p = cast[ptr UncheckedArray[char]](addr x.p[1])
 
 proc atEof*(p: StrSlice): bool {.inline.} =
   p.len == 0
 
 
-proc toSlice*(buff: ptr UncheckedArray[char], len: int): StrSlice =
+proc toSlice*(buff: ptr UncheckedArray[char], len: int): StrSlice {.inline.} =
   StrSlice(p : buff, z : cast[ptr[UncheckedArray[char]]](cast[int](buff) + len))
 
-proc toSlice*(buff: openArray[char]): StrSlice =
+proc toSlice*(buff: openArray[char]): StrSlice {.inline.} =
   toSlice(cast[ptr UncheckedArray[char]](addr buff[0]), buff.len())
 
 
@@ -52,7 +52,7 @@ proc expectChar*(p: var StrSlice, c: char) =
     raiseAssert "Expected " & c & " got " & p.p[0]
   inc p
 
-proc peekChar*(p: var StrSlice): char =
+proc peekChar*(p: var StrSlice): char {.inline.} =
   p.skipWhitespace()
   p.p[0]
 
