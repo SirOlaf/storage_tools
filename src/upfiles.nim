@@ -156,6 +156,7 @@ iterator iterUpfileEntities*(data: openArray[char]): Entity =
     var p = data.toSlice()
     while not p.atEof():
       yield p.parseEntity()
+      p.skipWhitespace()
 
 proc countUpfileEntities*(data: openArray[char]): int =
   result = 0
