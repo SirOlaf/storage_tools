@@ -15,12 +15,15 @@ import upfiles
 
 const
   minIntervalLen = 4
+  NoDirIdx = -1
 
 
+# TODO: Path prefixes if directory indices aren't good enough
 type
-  ArchiveFilePath* = (string, set[FilePermission])
-  ArchiveDirPath* = (string, set[FilePermission])
+  ArchiveFilePath* = tuple[name: string, dirIdx: DirIndex, perms: set[FilePermission]]
+  ArchiveDirPath* = tuple[path: string, perms: set[FilePermission]]
   ArchiveIndex* = uint64
+  DirIndex* = int
 
   ArchiveInterval* = object
     a*, b*: FileIndex
@@ -56,109 +59,127 @@ proc path(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
     x.writeRaw(cast[int16](perms).toOct(3) & " ")
     x.putStr(p)
 
-proc smallFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
+proc filePath(x: var UpfileWriter, p: string, dirIndex: DirIndex, perms: set[FilePermission]) =
+  x.terminated:
+    x.writeRaw(cast[int16](perms).toOct(3) & " ")
+    x.writeRaw($dirIndex & " ")
+    x.putStr(p)
+
+proc smallFile(x: var UpfileWriter, p: string, dirIndex: DirIndex, perms: set[FilePermission]) =
   x.writeRaw("s ")
-  x.path(p, perms)
+  x.filePath(p, dirIndex, perms)
 
-proc bigFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
+proc bigFile(x: var UpfileWriter, p: string, dirIndex: DirIndex, perms: set[FilePermission]) =
   x.writeRaw("b ")
-  x.path(p, perms)
+  x.filePath(p, dirIndex, perms)
 
-proc file(x: var UpfileWriter, p: string, small: bool, perms: set[FilePermission]) =
+proc file(x: var UpfileWriter, p: string, dirIndex: DirIndex, small: bool, perms: set[FilePermission]) =
   if small:
-    x.smallFile(p, perms)
+    x.smallFile(p, dirIndex, perms)
   else:
-    x.bigFile(p, perms)
+    x.bigFile(p, dirIndex, perms)
 
-proc gapFile(x: var UpfileWriter, idx: int, p: string, small: bool, perms: set[FilePermission]) =
+proc gapFile(x: var UpfileWriter, idx: int, p: string, dirIndex: DirIndex, small: bool, perms: set[FilePermission]) =
   x.writeRaw("g ")
   x.writeRaw($idx & " ")
-  x.file(p, small, perms)
+  x.file(p, dirIndex, small, perms)
 
-proc emptyFile(x: var UpfileWriter, p: string, perms: set[FilePermission]) =
+proc emptyFile(x: var UpfileWriter, p: string, dirIndex: DirIndex, perms: set[FilePermission]) =
   x.writeRaw("e ")
-  x.path(p, perms)
+  x.filePath(p, dirIndex, perms)
 
 proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
   x.entity:
+    if archive.dirs.len() > 0:
+      x.group "dirs":
+        for p in archive.dirs:
+          x.path(p.path, p.perms)
     if archive.intervals.len() > 0 or archive.singles.len() > 0 or archive.emptyFiles.len() > 0:
       x.group "files":
         for i in archive.intervals:
           x.interval(i.a, i.b):
             var j = i.a
             for p in i.paths:
-              x.file(p[0], j in archive.smallFiles, p[1])
+              x.file(p.name, p.dirIdx, j in archive.smallFiles, p.perms)
               inc j
         for s in archive.singles:
-          x.gapFile(s.index, s.path[0], s.index in archive.smallFiles, s.path[1])
+          x.gapFile(s.index, s.path.name, s.path.dirIdx, s.index in archive.smallFiles, s.path.perms)
         for e in archive.emptyFiles:
-          x.emptyFile(e[0], e[1])
-    if archive.dirs.len() > 0:
-      x.group "dirs":
-        for p in archive.dirs:
-          x.path(p[0], p[1])
-
+          x.emptyFile(e.name, e.dirIdx, e.perms)
 
 proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
   if not dirExists(folderPath):
     raiseAssert "Invalid directory path"
   let folderPath = absolutePath(folderPath).strip(chars={'/'}, leading=false, trailing=true)
 
+  template dirPathToIdx(dirPath: string): DirIndex =
+    if dirPath == "":
+      NoDirIdx
+    else:
+      knownDirs[dirPath]
+
   var archive = ArchiveEntry()
 
-  var dirs = initTable[string, set[FilePermission]]()
-  var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[(string, set[FilePermission])]]]()
+  var knownDirs = newTable[string, DirIndex]()
+  var dirs = newSeq[ArchiveDirPath]()
+  var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[ArchiveFilePath]]]()
   db.fileDb.transaction:
     for dirPath in walkDirRec(folderPath, yieldFilter={pcDir}, relative=true, skipSpecial=true):
-      if dirPath notin dirs:
-        dirs[dirPath] = getFilePermissions(folderPath.joinPath(dirPath))
+      let dirPath = dirPath.split(PathSep).join("/").normalizedPath()
+      if dirPath notin knownDirs:
+        knownDirs[dirPath] = dirs.len()
+        dirs.add((dirPath, getFilePermissions(folderPath.joinPath(dirPath))))
 
     for filePath in walkDirRec(folderPath, relative=true, skipSpecial=true):
+      let
+        filePath = filePath.split(PathSep).join("/").normalizedPath()
+        fileName = filePath.extractFilename()
+        fileDir = if "/" in filePath: filePath.parentDir() else: ""
       let perms = getFilePermissions(folderPath.joinPath(filePath))
       if getFileSize(folderPath.joinPath(filePath)) == 0:
-        archive.emptyFiles.add((filePath, perms))
+        archive.emptyFiles.add((fileName, fileDir.dirPathToIdx(), perms))
       else:
         let fileIndex = db.fileDb.insertFile(folderPath.joinPath(filePath))
         if db.fileDb.entries[fileIndex].isInSmallBlock:
           archive.smallFiles.incl(fileIndex)
 
-        let node = newDoublyLinkedNode((filePath, perms))
+        let node = newDoublyLinkedNode((fileName, fileDir.dirPathToIdx(), perms))
         if intervals.head == nil:
           intervals.append(newDoublyLinkedNode((
             a : fileIndex,
             b : fileIndex,
-            paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node)
+            paths : DoublyLinkedList[ArchiveFilePath](head : node, tail : node)
           )))
         else:
           var it = intervals.head
           while it != nil:
             if fileIndex + 1 == it.value.a:
               it.value.a = fileIndex
-              it.value.paths.prepend((filePath, perms))
+              it.value.paths.prepend((fileName, fileDir.dirPathToIdx(), perms))
               break
             elif fileIndex - 1 == it.value.b:
               it.value.b = fileIndex
-              it.value.paths.append((filePath, perms))
+              it.value.paths.append((fileName, fileDir.dirPathToIdx(), perms))
               break
             it = it.next
           if it == nil:
             # Couldn't find an interval that works
             if fileIndex < intervals.head.value.a:
-              let node = newDoublyLinkedNode((filePath, perms))
+              let node = newDoublyLinkedNode((fileName, fileDir.dirPathToIdx(), perms))
               intervals.prepend(newDoublyLinkedNode((
                 a : fileIndex,
                 b : fileIndex,
-                paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node),
+                paths : DoublyLinkedList[ArchiveFilePath](head : node, tail : node),
               )))
             else:
-              let node = newDoublyLinkedNode((filePath, perms))
+              let node = newDoublyLinkedNode((fileName, fileDir.dirPathToIdx(), perms))
               intervals.append(newDoublyLinkedNode((
                 a : fileIndex,
                 b : fileIndex,
-                paths : DoublyLinkedList[(string, set[FilePermission])](head : node, tail : node),
+                paths : DoublyLinkedList[ArchiveFilePath](head : node, tail : node),
               )))
 
-  for d in dirs.pairs():
+  for d in dirs:
     archive.dirs.add(d)
 
   # There may be runs of identical files and intervals may overlap, so they must not be filtered, only merged whenever possible
@@ -212,42 +233,51 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
   let archive = db.archives[archiveIndex]
   var createdDirs = initHashSet[string]()
   template ensureDir(dir: ArchiveDirPath) =
-    let p = toDir.joinPath(dir[0])
+    let p = toDir.joinPath(dir.path)
     if p notin createdDirs:
       for d in p.parentDirs():
         createdDirs.incl(p)
     createDir(p)
-    setFilePermissions(p, dir[1])
+    setFilePermissions(p, dir.perms)
+
+  template makeFilePath(p: ArchiveFilePath): string =
+    if p.dirIdx == NoDirIdx:
+      toDir.joinPath(p.name)
+    else:
+      toDir.joinPath(archive.dirs[p.dirIdx].path).joinPath(p.name)
 
   for x in archive.dirs:
     ensureDir x
   for x in archive.emptyFiles:
-    let f = open(toDir.joinPath(x[0]), fmWrite)
+    let f = open(x.makeFilePath(), fmWrite)
     f.close()
-    setFilePermissions(toDir.joinPath(x[0]), x[1])
+    setFilePermissions(x.makeFilePath(), x.perms)
 
-  var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[(string, set[FilePermission])]())
+  var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[tuple[path: string, perms: set[FilePermission]]]())
   for x in archive.singles:
     if db.fileDb.entries[x.index].isInSmallBlock():
       smallFiles.indices.add(x.index)
-      smallFiles.fullPaths.add((toDir.joinPath(x.path[0]), x.path[1]))
+      smallFiles.fullPaths.add((x.path.makeFilePath(), x.path.perms))
     else:
-      db.fileDb.restoreBigFileFromStore(x.index, toDir.joinPath(x.path[0]), x.path[1])
+      db.fileDb.restoreBigFileFromStore(x.index, x.path.makeFilePath(), x.path.perms)
 
   for x in archive.intervals:
     for fileIndex in x.a .. x.b:
       let i = fileIndex - x.a
       if db.filedb.entries[fileIndex].isInSmallBlock():
         smallFiles.indices.add(fileIndex)
-        smallFiles.fullPaths.add((toDir.joinPath(x.paths[i][0]), x.paths[i][1]))
+        smallFiles.fullPaths.add((path : x.paths[i].makeFilePath(), perms : x.paths[i].perms))
       else:
-        db.fileDb.restoreBigFileFromStore(fileIndex, toDir.joinPath(x.paths[i][0]), x.paths[i][1])
+        db.fileDb.restoreBigFileFromStore(fileIndex, x.paths[i].makeFilePath(), x.paths[i].perms)
   db.fileDb.restoreSmallFilesFromStore(smallFiles.indices, smallFiles.fullPaths)
 
 
 
-proc parsePath(permNode, pathNode: upfiles.Node): (string, set[FilePermission]) {.inline.} =
+proc parsePath(permNode, pathNode: upfiles.Node): ArchiveDirPath {.inline.} =
   (upfileUnescape(UpfileStr($pathNode.raw)), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
+
+proc parseFilePath(permNode, dirIdxNode, pathNode: upfiles.Node): ArchiveFilePath {.inline.} =
+  (upfileUnescape(UpfileStr($pathNode.raw)), parseInt($dirIdxNode.raw), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
 
 proc parseInterval(node: upfiles.Node): (int, int) {.inline.} =
   let s = $node.raw
@@ -271,7 +301,7 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
           var interval = ArchiveInterval(a : ends[0], b : ends[1])
           for i in interval.a .. interval.b:
             let e = fieldNode.kids[2].kids[i - interval.a]
-            interval.paths.add(parsePath(e.kids[1], e.kids[2]))
+            interval.paths.add(parseFilePath(e.kids[1], e.kids[2], e.kids[3]))
             if e.kids[0].parseIsSmall():
               result.smallFiles.incl(i)
           result.intervals.add(interval)
@@ -279,12 +309,12 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
           let idx = parseInt($fieldNode.kids[1].raw)
           result.singles.add(ArchiveSingleFile(
             index : idx,
-            path : parsePath(fieldNode.kids[3], fieldNode.kids[4]),
+            path : parseFilePath(fieldNode.kids[3], fieldNode.kids[4], fieldNode.kids[5]),
           ))
           if fieldNode.kids[2].parseIsSmall():
             result.smallFiles.incl(idx)
         of "e":
-          result.emptyFiles.add(parsePath(fieldNode.kids[1], fieldNode.kids[2]))
+          result.emptyFiles.add(parseFilePath(fieldNode.kids[1], fieldNode.kids[2], fieldNode.kids[3]))
         else:
           raiseAssert "Unknown file entry kind: " & $fieldNode.kids[0].raw
     elif groupName == "dirs":
@@ -326,9 +356,9 @@ when isMainModule:
 
   writeFile("testarchives.upa", archiveDb.writer.buff)
 
-  echo parseNthArchiveInUpfile(archiveDb.writer.buff, 2)
+  echo parseNthArchiveInUpfile(archiveDb.writer.buff, 0)
 
-  when true:
+  when false:
     var restoreStart = cpuTime()
     removeDir("testfiles_out")
     archiveDb.restoreArchive(0, "testfiles_out")
