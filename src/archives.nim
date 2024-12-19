@@ -7,6 +7,7 @@ import std/[
   sequtils,
   sets,
   tables,
+  algorithm,
 ]
 
 import files
@@ -107,6 +108,19 @@ proc putArchive(x: var UpfileWriter, archive: ArchiveEntry) =
         for e in archive.emptyFiles:
           x.emptyFile(e.name, e.dirIdx, e.perms)
 
+proc cmpArchiveDirPaths(x, y: ArchiveDirPath): int =
+  # Compare based on depth and alphabetical order
+  let xParts = x.path.split("/")
+  let yParts = y.path.split("/")
+  if xParts.len() != yParts.len():
+    xParts.len().cmp(yParts.len())
+  else:
+    for i in 0 ..< xParts.len():
+      let c = xParts[i].cmp(yParts[i])
+      if c != 0:
+        return c
+    0
+
 proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
   if not dirExists(folderPath):
     raiseAssert "Invalid directory path"
@@ -126,9 +140,13 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
   db.fileDb.transaction:
     for dirPath in walkDirRec(folderPath, yieldFilter={pcDir}, relative=true, skipSpecial=true):
       let dirPath = dirPath.split(PathSep).join("/").normalizedPath()
-      if dirPath notin knownDirs:
-        knownDirs[dirPath] = dirs.len()
-        dirs.add((dirPath, getFilePermissions(folderPath.joinPath(dirPath))))
+      doAssert dirPath notin knownDirs
+      knownDirs[dirPath] = 0
+      dirs.add((dirPath, getFilePermissions(folderPath.joinPath(dirPath))))
+    dirs.sort(cmpArchiveDirPaths)
+    archive.dirs = dirs
+    for i in 0 ..< dirs.len():
+      knownDirs[dirs[i].path] = i
 
     for filePath in walkDirRec(folderPath, relative=true, skipSpecial=true):
       let
@@ -178,9 +196,6 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
                 b : fileIndex,
                 paths : DoublyLinkedList[ArchiveFilePath](head : node, tail : node),
               )))
-
-  for d in dirs:
-    archive.dirs.add(d)
 
   # There may be runs of identical files and intervals may overlap, so they must not be filtered, only merged whenever possible
   var it = intervals.head
