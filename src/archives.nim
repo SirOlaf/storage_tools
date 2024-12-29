@@ -12,6 +12,7 @@ import std/[
 
 import files
 import upfiles
+import murmur
 
 
 const
@@ -24,7 +25,7 @@ type
   ArchiveFilePath* = tuple[name: string, dirIdx: DirIndex, perms: set[FilePermission]]
   ArchiveDirPath* = tuple[path: string, perms: set[FilePermission]]
   ArchiveIndex* = uint64
-  DirIndex* = int
+  DirIndex* = int64
 
   ArchiveInterval* = object
     a*, b*: FileIndex
@@ -34,20 +35,68 @@ type
     index*: FileIndex
     path*: ArchiveFilePath
 
+  ArchiveStructureHash* = uint32
+  # TODO: Store only structureHash and a slice
   ArchiveEntry* = object
-    # TODO: Store info about whether or not the file is part of a small block once the custom format is ready
     # Archive name is not stored here, it should be handled by the metadata layer
+    structureHash*: ArchiveStructureHash # TODO: Write to file instead of calculating during load?
     smallFiles*: HashSet[FileIndex]
     intervals*: seq[ArchiveInterval]
     singles*: seq[ArchiveSingleFile]
     emptyFiles*: seq[ArchiveFilePath]
     dirs*: seq[ArchiveDirPath]
-    #emptyDirs*: seq[ArchiveDirPath]
 
   ArchiveDb* = object
     fileDb*: FileDb
     archives*: seq[ArchiveEntry]
     writer*: UpfileWriter
+
+
+proc hashStructure(archive: ArchiveEntry): ArchiveStructureHash =
+  result = 0
+  var acc = 0u32 # This is good enough, the main priority is order invariance
+                         # Collisions will be handled by a full structural equality check
+
+  template put(x: string, body: untyped) =
+    result = result xor murmur2(x)
+    body
+
+  template add(x: uint64) =
+    acc += (x and 0xFFFFFFFFu64).uint32
+    acc += (x shr 32).uint32
+
+  template add(x: int64) =
+    add cast[uint64](x)
+
+  template add(x: set[FilePermission]) =
+    acc += cast[uint16](x)
+
+  template put(x: ArchiveFilePath, body: untyped) =
+    let p = if x.dirIdx >= 0: archive.dirs[x.dirIdx].path.joinPath(x.name) else: x.name
+    put p:
+      add x.perms
+      body
+
+  template put(x: ArchiveDirPath) =
+    put x.path:
+      add x.perms
+
+  for interval in archive.intervals:
+    for idx in interval.a .. interval.b:
+      put interval.paths[idx - interval.a]:
+        add idx
+
+  for i in archive.singles:
+    put i.path:
+      add i.index
+
+  for i in archive.emptyFiles:
+    put i: discard
+
+  for i in archive.dirs:
+    put i
+
+  result = result xor acc
 
 
 template interval(x: var UpfileWriter, a, b: int, body: untyped): untyped =
@@ -234,9 +283,10 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
 
     it = it.next
 
-  # TODO: Better equivalence check that doesn't rely on implementation details
+  # TODO: Implement structural equality check to be run after the structure hash matches
+  archive.structureHash = archive.hashStructure()
   for i in 0 ..< db.archives.len():
-    if db.archives[i] == archive:
+    if db.archives[i].structureHash == archive.structureHash and db.archives[i] == archive:
       return i.ArchiveIndex
 
   result = db.archives.len().ArchiveIndex
@@ -337,6 +387,7 @@ proc parseArchive(raw: upfiles.Node): ArchiveEntry =
         result.dirs.add(parsePath(k.kids[0], k.kids[1]))
     else:
       raiseAssert "Unknown upfile group: " & groupName
+  result.structureHash = result.hashStructure()
 
 proc parseNthArchiveInUpfile*(data: openArray[char], n: int): ArchiveEntry =
   data.parseNthEntityInUpfile(n).parseArchive()
