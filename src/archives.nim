@@ -46,6 +46,17 @@ type
     emptyFiles*: seq[ArchiveFilePath]
     dirs*: seq[ArchiveDirPath]
 
+  LightArchiveInterval* = object
+    a*, b*: FileIndex
+    raw: StrSlice
+
+  LightArchiveEntry* = object
+    structureHash*: ArchiveStructureHash
+    rawIntervals: seq[LightArchiveInterval]
+    rawSingles: seq[StrSlice]
+    rawEmptyFiles: seq[StrSlice]
+    rawDirs: StrSlice
+
   ArchiveDb* = object
     fileDb*: FileDb
     archives*: seq[ArchiveEntry]
@@ -397,6 +408,108 @@ iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =
     yield ent.parseArchive()
 
 
+proc takePerms(p: var StrSlice): set[FilePermission] {.inline.} =
+  cast[set[FilePermission]](parseOctInt($p.parseAnyNonTerm()).uint16)
+
+proc takeInt(p: var StrSlice): int {.inline.} =
+  parseInt($p.parseAnyNonTerm())
+
+proc takeString(p: var StrSlice): string {.inline.} =
+  upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
+
+iterator iterDirs*(archive: LightArchiveEntry): ArchiveDirPath =
+  var p = archive.rawDirs
+  p.withParens:
+    while p.peekChar() != ')':
+      let
+        perms = p.takePerms()
+        path = upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
+      p.expectChar(';')
+      yield (path : path, perms : perms)
+
+iterator iterEmptyFiles*(archive: LightArchiveEntry): ArchiveFilePath =
+  for p in archive.rawEmptyFiles:
+    var p = p
+    doAssert $p.parseAsciiWord() == "e"
+    let
+      perms = p.takePerms()
+      dirIdx = p.takeInt()
+      name = p.takeString()
+    p.expectChar(';')
+    yield (name : name, dirIdx : dirIdx, perms : perms)
+
+iterator iterSingles*(archive: LightArchiveEntry): ArchiveSingleFile =
+  for p in archive.rawSingles:
+    var p = p
+    doAssert $p.parseAsciiWord() == "g"
+    let
+      fileId = p.takeInt()
+      sizeTag = p.parseAsciiWord()
+      perms = p.takePerms()
+      dirIdx = p.takeInt()
+      name = p.takeString()
+    p.expectChar(';')
+    yield ArchiveSingleFile(
+      index : fileId,
+      path : (name : name, dirIdx : dirIdx, perms : perms)
+    )
+
+iterator iterFiles*(interval: LightArchiveInterval): ArchiveFilePath =
+  var p = interval.raw
+  p.withParens:
+    for i in interval.a .. interval.b:
+      let
+        sizeTag = p.parseAsciiWord()
+        perms = p.takePerms()
+        dirIdx = p.takeInt()
+        name = p.takeString()
+      p.expectChar(';')
+      yield (name : name, dirIdx : dirIdx, perms : perms)
+
+iterator iterLightweightArchives*(data: openArray[char]): LightArchiveEntry =
+  if data.len() > 0:
+    var p = data.toSlice()
+    p.skipWhitespace()
+    while not p.atEof():
+      var cur = LightArchiveEntry()
+      p.withParens:
+        while p.peekChar() != ')':
+          var groupName = p.parseAsciiWord()
+          case $groupName
+          of "dirs":
+            cur.rawDirs = p.skipScope()
+          of "files":
+            p.withParens:
+              while p.peekChar() != ')':
+                var nodeKind = p.parseAsciiWord()
+                case $nodeKind
+                of "i":
+                  let intervalEnds = $p.parseAnyNonTerm()
+                  let comma = intervalEnds.find(',')
+                  let s = p.skipScope()
+                  cur.rawIntervals.add(LightArchiveInterval(
+                    a : parseInt(intervalEnds[0 ..< comma]),
+                    b : parseInt(intervalEnds[comma + 1 ..< intervalEnds.len()]),
+                    raw : s,
+                  ))
+                of "e":
+                  while p.peekChar() != ';':
+                    inc p
+                  p.expectChar(';')
+                  cur.rawEmptyFiles.add(StrSlice(p : nodeKind.p, z : p.p))
+                of "g":
+                  while p.peekChar() != ';':
+                    inc p
+                  p.expectChar(';')
+                  cur.rawSingles.add(StrSlice(p : nodeKind.p, z : p.p))
+                else:
+                  raiseAssert "Unknown file tag: " & $nodeKind
+          else:
+            raiseAssert "Unknown archive group: " & $groupName
+      yield cur
+      p.skipWhitespace()
+
+
 when isMainModule:
   import std/[
     times,
@@ -419,10 +532,31 @@ when isMainModule:
   discard archiveDb.insertArchive("testfiles2")
   discard archiveDb.insertArchive("testfilesempty")
   echo "Insert took ", cpuTime() - insertStart
-
   writeFile("testarchives.upa", archiveDb.writer.buff)
 
-  echo parseNthArchiveInUpfile(archiveDb.writer.buff, 0)
+  for l in iterLightweightArchives(archiveDb.writer.buff):
+    echo "------------------"
+    if l.rawDirs.len() > 0:
+      echo "Dirs:"
+      for d in l.iterDirs():
+        echo d
+    if l.rawEmptyFiles.len() > 0:
+      echo "Empty files:"
+      for e in l.iterEmptyFiles():
+        echo e
+    if l.rawIntervals.len() > 0:
+      echo "Intervals:"
+      for i in l.rawIntervals:
+        echo i.a, ",", i.b
+        for f in i.iterFiles():
+          echo f
+    if l.rawSingles.len() > 0:
+      echo "Singles:"
+      for s in l.iterSingles():
+        echo s
+
+
+  #echo parseNthArchiveInUpfile(archiveDb.writer.buff, 0)
 
   when false:
     var restoreStart = cpuTime()

@@ -14,7 +14,7 @@ type
 
   StrSlice* = object
     p*: ptr UncheckedArray[char]
-    z: ptr UncheckedArray[char] # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
+    z*: ptr UncheckedArray[char] # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
 
   Node* = object
     raw*: StrSlice
@@ -29,7 +29,7 @@ proc `$`*(x: StrSlice): string =
   result = newString(x.len)
   copyMem(addr result[0], x.p, x.len)
 
-proc inc(x: var StrSlice) {.inline.} =
+proc inc*(x: var StrSlice) {.inline.} =
   x.p = cast[ptr UncheckedArray[char]](addr x.p[1])
 
 proc atEof*(p: StrSlice): bool {.inline.} =
@@ -91,8 +91,8 @@ proc skipScope*(p: var StrSlice): StrSlice =
       if depth == 0:
         break
     inc p
-  result.z = p.p
   p.expectChar(')')
+  result.z = p.p
 
 proc parseScope*(p: var StrSlice): Node =
   p.skipWhitespace()
