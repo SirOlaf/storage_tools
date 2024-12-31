@@ -61,6 +61,7 @@ type
     smallFileQueue: seq[SmallFileInfo]
     dbPath*: string
     storePath*: string # stored separately from dbPath in preparation for a detached usecase
+    knownCrcs: HashSet[uint32]
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextBlockId: BlockId
     nextEntryIndex: FileIndex
@@ -235,16 +236,22 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
   if rawPtr.size == 0:
     raiseAssert "Bad file size"
 
-  let
-    crc32 = crc32(rawPtr.mem, rawPtr.size)
-    sha256 = sha256(rawPtr.mem, rawPtr.size)
+  let crc32 = crc32(rawPtr.mem, rawPtr.size)
 
-  if sha256 in db.knownHashes:
-    # TODO: Is linear scan fast enough?
+  var
+    computedSha = false
+    sha256 = default(array[32, byte])
+
+  if crc32 in db.knownCrcs:
+    sha256 = sha256(rawPtr.mem, rawPtr.size)
+    computedSha = true
     for i in 0 ..< dbSize:
-      if db.entries[i].sha256 == sha256:
+      if db.entries[i].crc32 == crc32 and db.entries[i].sha256 == sha256:
         return i
-    raiseAssert "Hash is known but the associated file could not be found"
+
+  if not computedSha:
+    sha256 = sha256(rawPtr.mem, rawPtr.size)
+  db.knownCrcs.incl(crc32)
   db.knownHashes.incl(sha256)
 
   var compressedData = compress(cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1))
@@ -361,12 +368,14 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     masterKey : deriveMasterKey(password, salt),
     salt : salt,
     pwHash : pwHash,
+    knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
   )
   result.nextBlockId = result.searchNextBlockId()
   result.nextEntryIndex = result.searchTailIndex()
 
   for i in 0 ..< result.nextEntryIndex:
+    result.knownCrcs.incl(result.entries[i].crc32)
     result.knownHashes.incl(result.entries[i].sha256)
 
 proc save*(db: FileDb) =
