@@ -94,25 +94,29 @@ proc skipScope*(p: var StrSlice): StrSlice =
   p.expectChar(')')
   result.z = p.p
 
+template parenLoop*(p: var StrSlice, body: untyped): untyped =
+  p.withParens:
+    while p.peekChar() != ')':
+      body
+
 proc parseScope*(p: var StrSlice): Node =
   p.skipWhitespace()
   var raw = StrSlice(p : p.p)
   var kids = newSeq[Node]()
-  p.withParens:
-    while p.peekChar() != ')':
-      var partsRaw = StrSlice(p : p.p)
-      var parts = newSeq[Node]()
-      while p.peekChar() notin TermChars:
-        parts.add(Node(raw : p.parseAnyNonTerm()))
-      if p.peekChar() == '(':
-        parts.add(p.parseScope())
-      partsRaw.z = p.p
-      kids.add(Node(
-        raw : partsRaw,
-        kids : parts,
-      ))
-      if p.peekChar() == ';':
-        inc p
+  p.parenLoop:
+    var partsRaw = StrSlice(p : p.p)
+    var parts = newSeq[Node]()
+    while p.peekChar() notin TermChars:
+      parts.add(Node(raw : p.parseAnyNonTerm()))
+    if p.peekChar() == '(':
+      parts.add(p.parseScope())
+    partsRaw.z = p.p
+    kids.add(Node(
+      raw : partsRaw,
+      kids : parts,
+    ))
+    if p.peekChar() == ';':
+      inc p
 
   raw.z = p.p
   Node(
@@ -135,9 +139,8 @@ proc parseEntity*(p: var StrSlice): Entity =
   p.skipWhitespace()
   var raw = StrSlice(p : p.p)
   var groups = newSeq[Node]()
-  p.withParens:
-    while p.peekChar() != ')':
-      groups.add(p.parseGroup())
+  p.parenLoop:
+    groups.add(p.parseGroup())
   raw.z = p.p
   Node(
     raw : raw,

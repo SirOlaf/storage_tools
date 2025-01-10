@@ -36,7 +36,6 @@ type
     path*: ArchiveFilePath
 
   ArchiveStructureHash* = uint32
-  # TODO: Store only structureHash and a slice
   ArchiveEntry* = object
     # Archive name is not stored here, it should be handled by the metadata layer
     structureHash*: ArchiveStructureHash # TODO: Write to file instead of calculating during load?
@@ -45,17 +44,6 @@ type
     singles*: seq[ArchiveSingleFile]
     emptyFiles*: seq[ArchiveFilePath]
     dirs*: seq[ArchiveDirPath]
-
-  LightArchiveInterval* = object
-    a*, b*: FileIndex
-    raw: StrSlice
-
-  LightArchiveEntry* = object
-    structureHash*: ArchiveStructureHash
-    rawIntervals: seq[LightArchiveInterval]
-    rawSingles: seq[StrSlice]
-    rawEmptyFiles: seq[StrSlice]
-    rawDirs: StrSlice
 
   ArchiveDb* = object
     fileDb*: FileDb
@@ -348,66 +336,6 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
   db.fileDb.restoreSmallFilesFromStore(smallFiles.indices, smallFiles.fullPaths)
 
 
-
-proc parsePath(permNode, pathNode: upfiles.Node): ArchiveDirPath {.inline.} =
-  (upfileUnescape(UpfileStr($pathNode.raw)), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
-
-proc parseFilePath(permNode, dirIdxNode, pathNode: upfiles.Node): ArchiveFilePath {.inline.} =
-  (upfileUnescape(UpfileStr($pathNode.raw)), parseInt($dirIdxNode.raw), cast[set[FilePermission]](parseOctInt($permNode.raw).uint16))
-
-proc parseInterval(node: upfiles.Node): (int, int) {.inline.} =
-  let s = $node.raw
-  let comma = s.find(",")
-  (parseInt(s[0 ..< comma]), parseInt(s[comma + 1 ..< s.len()]))
-
-proc parseIsSmall(node: upfiles.Node): bool {.inline.} =
-  let x = $node.raw
-  assert x in "sb", x
-  x == "s"
-
-proc parseArchive(raw: upfiles.Node): ArchiveEntry =
-  result = ArchiveEntry()
-  for groupNode in raw.kids:
-    let groupName = $groupNode.kids[0].raw
-    if groupName == "files":
-      for fieldNode in groupNode.kids[1].kids:
-        case $fieldNode.kids[0].raw
-        of "i":
-          let ends = fieldNode.kids[1].parseInterval()
-          var interval = ArchiveInterval(a : ends[0], b : ends[1])
-          for i in interval.a .. interval.b:
-            let e = fieldNode.kids[2].kids[i - interval.a]
-            interval.paths.add(parseFilePath(e.kids[1], e.kids[2], e.kids[3]))
-            if e.kids[0].parseIsSmall():
-              result.smallFiles.incl(i)
-          result.intervals.add(interval)
-        of "g":
-          let idx = parseInt($fieldNode.kids[1].raw)
-          result.singles.add(ArchiveSingleFile(
-            index : idx,
-            path : parseFilePath(fieldNode.kids[3], fieldNode.kids[4], fieldNode.kids[5]),
-          ))
-          if fieldNode.kids[2].parseIsSmall():
-            result.smallFiles.incl(idx)
-        of "e":
-          result.emptyFiles.add(parseFilePath(fieldNode.kids[1], fieldNode.kids[2], fieldNode.kids[3]))
-        else:
-          raiseAssert "Unknown file entry kind: " & $fieldNode.kids[0].raw
-    elif groupName == "dirs":
-      for k in groupNode.kids[1].kids:
-        result.dirs.add(parsePath(k.kids[0], k.kids[1]))
-    else:
-      raiseAssert "Unknown upfile group: " & groupName
-  result.structureHash = result.hashStructure()
-
-proc parseNthArchiveInUpfile*(data: openArray[char], n: int): ArchiveEntry =
-  data.parseNthEntityInUpfile(n).parseArchive()
-
-iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =
-  for ent in data.iterUpfileEntities():
-    yield ent.parseArchive()
-
-
 proc takePerms(p: var StrSlice): set[FilePermission] {.inline.} =
   cast[set[FilePermission]](parseOctInt($p.parseAnyNonTerm()).uint16)
 
@@ -417,96 +345,83 @@ proc takeInt(p: var StrSlice): int {.inline.} =
 proc takeString(p: var StrSlice): string {.inline.} =
   upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
 
-iterator iterDirs*(archive: LightArchiveEntry): ArchiveDirPath =
-  var p = archive.rawDirs
-  p.withParens:
-    while p.peekChar() != ')':
-      let
-        perms = p.takePerms()
-        path = upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
-      p.expectChar(';')
-      yield (path : path, perms : perms)
+proc parseDir(p: var StrSlice): ArchiveDirPath {.inline.} =
+  let
+    perms = p.takePerms()
+    path = p.takeString()
+  p.expectChar(';')
+  (path : path, perms : perms)
 
-iterator iterEmptyFiles*(archive: LightArchiveEntry): ArchiveFilePath =
-  for p in archive.rawEmptyFiles:
-    var p = p
-    doAssert $p.parseAsciiWord() == "e"
-    let
-      perms = p.takePerms()
-      dirIdx = p.takeInt()
-      name = p.takeString()
-    p.expectChar(';')
-    yield (name : name, dirIdx : dirIdx, perms : perms)
+proc parseFile(p: var StrSlice): tuple[path: ArchiveFilePath, isSmall: bool] {.inline.} =
+  let
+    isSmall = $p.parseAsciiWord() == "s"
+    perms = p.takePerms()
+    dirIdx = p.takeInt().DirIndex
+    name = p.takeString()
+  (path : (name : name, dirIdx : dirIdx, perms : perms), isSmall : isSmall)
 
-iterator iterSingles*(archive: LightArchiveEntry): ArchiveSingleFile =
-  for p in archive.rawSingles:
-    var p = p
-    doAssert $p.parseAsciiWord() == "g"
-    let
-      fileId = p.takeInt()
-      sizeTag = p.parseAsciiWord()
-      perms = p.takePerms()
-      dirIdx = p.takeInt()
-      name = p.takeString()
-    p.expectChar(';')
-    yield ArchiveSingleFile(
-      index : fileId,
-      path : (name : name, dirIdx : dirIdx, perms : perms)
-    )
+proc parseArchive(p: var StrSlice): ArchiveEntry =
+  result = ArchiveEntry()
+  p.parenLoop:
+    var groupName = p.parseAsciiWord()
+    case $groupName
+    of "dirs":
+      p.parenLoop:
+        result.dirs.add p.parseDir()
+    of "files":
+      p.parenLoop:
+        var nodeKind = p.parseAsciiWord()
+        case $nodeKind
+        of "i":
+          let
+            intervalEnds = $p.parseAnyNonTerm()
+            comma = intervalEnds.find(',')
+            a = parseInt(intervalEnds[0 ..< comma])
+            b = parseInt(intervalEnds[comma + 1 ..< intervalEnds.len()])
+          var paths = newSeq[ArchiveFilePath]()
+          var i = a
+          p.parenLoop:
+            let info = p.parseFile()
+            paths.add(info.path)
+            if info.isSmall:
+              result.smallFiles.incl(i)
+            inc i
+            p.expectChar(';')
+          result.intervals.add(ArchiveInterval(
+            a : a,
+            b : b,
+            paths : paths,
+          ))
+        of "e":
+          let
+            perms = p.takePerms()
+            dirIdx = p.takeInt().DirIndex
+            name = p.takeString()
+          p.expectChar(';')
+          result.emptyFiles.add((name : name, dirIdx : dirIdx, perms : perms))
+        of "g":
+          let
+            fileId = p.takeInt().FileIndex
+            info = p.parseFile()
+          p.expectChar(';')
+          result.singles.add(ArchiveSingleFile(
+            index : fileId,
+            path : info.path,
+          ))
+          if info.isSmall:
+            result.smallFiles.incl(fileId)
+        else:
+          raiseAssert "Unknown file tag: " & $nodeKind
+    else:
+      raiseAssert "Unknown archive group: " & $groupName
+  result.structureHash = result.hashStructure()
 
-iterator iterFiles*(interval: LightArchiveInterval): ArchiveFilePath =
-  var p = interval.raw
-  p.withParens:
-    for i in interval.a .. interval.b:
-      let
-        sizeTag = p.parseAsciiWord()
-        perms = p.takePerms()
-        dirIdx = p.takeInt()
-        name = p.takeString()
-      p.expectChar(';')
-      yield (name : name, dirIdx : dirIdx, perms : perms)
-
-iterator iterLightweightArchives*(data: openArray[char]): LightArchiveEntry =
+iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =
   if data.len() > 0:
     var p = data.toSlice()
     p.skipWhitespace()
     while not p.atEof():
-      var cur = LightArchiveEntry()
-      p.withParens:
-        while p.peekChar() != ')':
-          var groupName = p.parseAsciiWord()
-          case $groupName
-          of "dirs":
-            cur.rawDirs = p.skipScope()
-          of "files":
-            p.withParens:
-              while p.peekChar() != ')':
-                var nodeKind = p.parseAsciiWord()
-                case $nodeKind
-                of "i":
-                  let intervalEnds = $p.parseAnyNonTerm()
-                  let comma = intervalEnds.find(',')
-                  let s = p.skipScope()
-                  cur.rawIntervals.add(LightArchiveInterval(
-                    a : parseInt(intervalEnds[0 ..< comma]),
-                    b : parseInt(intervalEnds[comma + 1 ..< intervalEnds.len()]),
-                    raw : s,
-                  ))
-                of "e":
-                  while p.peekChar() != ';':
-                    inc p
-                  p.expectChar(';')
-                  cur.rawEmptyFiles.add(StrSlice(p : nodeKind.p, z : p.p))
-                of "g":
-                  while p.peekChar() != ';':
-                    inc p
-                  p.expectChar(';')
-                  cur.rawSingles.add(StrSlice(p : nodeKind.p, z : p.p))
-                else:
-                  raiseAssert "Unknown file tag: " & $nodeKind
-          else:
-            raiseAssert "Unknown archive group: " & $groupName
-      yield cur
+      yield p.parseArchive()
       p.skipWhitespace()
 
 
@@ -534,29 +449,33 @@ when isMainModule:
   echo "Insert took ", cpuTime() - insertStart
   writeFile("testarchives.upa", archiveDb.writer.buff)
 
-  for l in iterLightweightArchives(archiveDb.writer.buff):
+  for l in iterArchivesInUpfile(archiveDb.writer.buff):
     echo "------------------"
-    if l.rawDirs.len() > 0:
+    echo "Structure hash: ", l.structureHash
+    if l.dirs.len() > 0:
       echo "Dirs:"
-      for d in l.iterDirs():
+      for d in l.dirs:
         echo d
-    if l.rawEmptyFiles.len() > 0:
+    if l.emptyFiles.len() > 0:
       echo "Empty files:"
-      for e in l.iterEmptyFiles():
+      for e in l.emptyFiles:
         echo e
-    if l.rawIntervals.len() > 0:
+    if l.intervals.len() > 0:
       echo "Intervals:"
-      for i in l.rawIntervals:
+      for i in l.intervals:
         echo i.a, ",", i.b
-        for f in i.iterFiles():
+        for f in i.paths:
           echo f
-    if l.rawSingles.len() > 0:
+    if l.singles.len() > 0:
       echo "Singles:"
-      for s in l.iterSingles():
+      for s in l.singles:
         echo s
 
+    if l.smallFiles.len() > 0:
+      echo "Small files:"
+      for s in l.smallFiles:
+        echo s
 
-  #echo parseNthArchiveInUpfile(archiveDb.writer.buff, 0)
 
   when false:
     var restoreStart = cpuTime()
