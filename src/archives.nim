@@ -339,12 +339,6 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
 proc takePerms(p: var StrSlice): set[FilePermission] {.inline.} =
   cast[set[FilePermission]](parseOctInt($p.parseAnyNonTerm()).uint16)
 
-proc takeInt(p: var StrSlice): int {.inline.} =
-  parseInt($p.parseAnyNonTerm())
-
-proc takeString(p: var StrSlice): string {.inline.} =
-  upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
-
 proc parseDir(p: var StrSlice): ArchiveDirPath {.inline.} =
   let
     perms = p.takePerms()
@@ -363,7 +357,7 @@ proc parseFile(p: var StrSlice): tuple[path: ArchiveFilePath, isSmall: bool] {.i
 proc parseArchive(p: var StrSlice): ArchiveEntry =
   result = ArchiveEntry()
   p.parenLoop:
-    var groupName = p.parseAsciiWord()
+    let groupName = p.parseAsciiWord()
     case $groupName
     of "dirs":
       p.parenLoop:

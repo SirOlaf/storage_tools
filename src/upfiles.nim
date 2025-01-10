@@ -9,17 +9,11 @@ const
   TermChars* = {'(', ')', ';'} # must be escaped if used as part of a field
 
 type
-  EntityOffset* = int
   UpfileStr* = distinct string
 
   StrSlice* = object
     p*: ptr UncheckedArray[char]
     z*: ptr UncheckedArray[char] # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
-
-  Node* = object
-    raw*: StrSlice
-    kids*: seq[Node]
-  Entity* = Node
 
 
 proc len*(x: StrSlice): int {.inline.} =
@@ -41,6 +35,26 @@ proc toSlice*(buff: ptr UncheckedArray[char], len: int): StrSlice {.inline.} =
 
 proc toSlice*(buff: openArray[char]): StrSlice {.inline.} =
   toSlice(cast[ptr UncheckedArray[char]](addr buff[0]), buff.len())
+
+
+# TODO: Don't manually define escape sequences
+proc upfileEscape*(x: string): UpfileStr =
+  x.multiReplace(
+    ("$", "$d"),
+    (" ", "$s"),
+    ("(", "$p"),
+    (")", "$b"),
+    (";", "$c"),
+  ).UpfileStr
+
+proc upfileUnescape*(x: UpfileStr): string =
+  x.string.multiReplace(
+    ("$d", "$"),
+    ("$s", " "),
+    ("$p", "("),
+    ("$b", ")"),
+    ("$c", ";"),
+  )
 
 
 proc skipWhitespace*(p: var StrSlice) =
@@ -78,6 +92,12 @@ proc parseAnyNonTerm*(p: var StrSlice): StrSlice =
     inc p
   result.z = p.p
 
+proc takeInt*(p: var StrSlice): int {.inline.} =
+  parseInt($p.parseAnyNonTerm())
+
+proc takeString*(p: var StrSlice): string {.inline.} =
+  upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
+
 proc skipScope*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
   result = StrSlice(p : p.p)
@@ -99,84 +119,25 @@ template parenLoop*(p: var StrSlice, body: untyped): untyped =
     while p.peekChar() != ')':
       body
 
-proc parseScope*(p: var StrSlice): Node =
-  p.skipWhitespace()
-  var raw = StrSlice(p : p.p)
-  var kids = newSeq[Node]()
-  p.parenLoop:
-    var partsRaw = StrSlice(p : p.p)
-    var parts = newSeq[Node]()
-    while p.peekChar() notin TermChars:
-      parts.add(Node(raw : p.parseAnyNonTerm()))
-    if p.peekChar() == '(':
-      parts.add(p.parseScope())
-    partsRaw.z = p.p
-    kids.add(Node(
-      raw : partsRaw,
-      kids : parts,
-    ))
-    if p.peekChar() == ';':
-      inc p
 
-  raw.z = p.p
-  Node(
-    raw : raw,
-    kids : kids,
-  )
-
-proc parseGroup*(p: var StrSlice): Node =
-  p.skipWhitespace()
-  var raw = StrSlice(p : p.p)
-  let name = p.parseAsciiWord()
-  let scope = p.parseScope()
-  raw.z = p.p
-  Node(
-    raw : raw,
-    kids : @[Node(raw : name), scope]
-  )
-
-proc parseEntity*(p: var StrSlice): Entity =
-  p.skipWhitespace()
-  var raw = StrSlice(p : p.p)
-  var groups = newSeq[Node]()
-  p.parenLoop:
-    groups.add(p.parseGroup())
-  raw.z = p.p
-  Node(
-    raw : raw,
-    kids : groups,
-  )
-
-iterator iterUpfileEntityOffsets*(data: openArray[char]): EntityOffset =
+iterator iterUpfileEntities*(data: openArray[char]): StrSlice =
   if data.len() > 0:
     var p = data.toSlice()
     while not p.atEof():
-      let x = p.skipScope()
-      yield EntityOffset(cast[uint](x.p) - cast[uint](addr data[0]))
-
-iterator iterUpfileEntities*(data: openArray[char]): Entity =
-  if data.len() > 0:
-    var p = data.toSlice()
-    while not p.atEof():
-      yield p.parseEntity()
+      yield p.skipScope()
       p.skipWhitespace()
 
 proc countUpfileEntities*(data: openArray[char]): int =
   result = 0
-  for _ in data.iterUpfileEntityOffsets():
+  for _ in data.iterUpfileEntities():
     inc result
 
-proc parseNthEntityInUpfile*(data: openArray[char], n: int): Entity =
+proc takeNthEntityInUpfile*(data: openArray[char], n: int): StrSlice =
   doAssert data.len() > 0
   var p = data.toSlice()
   for i in 0 ..< n:
     discard p.skipScope()
-  p.parseEntity()
-
-proc parseUpfile*(data: openArray[char]): seq[Entity] =
-  result = newSeq[Node]()
-  for ent in iterUpfileEntities(data):
-    result.add ent
+  p.skipScope()
 
 
 type
@@ -185,26 +146,6 @@ type
     pretty*: bool
     indent: int
     afterNewline: bool
-
-
-# TODO: Don't manually define escape sequences
-proc upfileEscape*(x: string): UpfileStr =
-  x.multiReplace(
-    ("$", "$d"),
-    (" ", "$s"),
-    ("(", "$p"),
-    (")", "$b"),
-    (";", "$c"),
-  ).UpfileStr
-
-proc upfileUnescape*(x: UpfileStr): string =
-  x.string.multiReplace(
-    ("$d", "$"),
-    ("$s", " "),
-    ("$p", "("),
-    ("$b", ")"),
-    ("$c", ";"),
-  )
 
 
 proc writeRaw*(p: var UpfileWriter, x: string) =
@@ -307,9 +248,8 @@ when isMainModule:
   echo "Entity count: ", count
 
   let parseStart = cpuTime()
-  #let x = parseUpfile(data)
-  let x = parseNthEntityInUpfile(data, count - 1)
-  echo x.raw
+  let x = takeNthEntityInUpfile(data, count - 1)
+  echo x
 
   #echo x.raw
   echo "Took ", cpuTime() - parseStart

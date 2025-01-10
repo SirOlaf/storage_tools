@@ -48,44 +48,59 @@ proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = defaul
         if extra.custom.isSome():
           x.field "custom", extra.custom.get()
 
-proc parseMetadata*(raw: upfiles.Node): ArchiveMetadata =
+proc parseMetadata*(p: var StrSlice): ArchiveMetadata =
   result = ArchiveMetadata()
-  for groupNode in raw.kids:
-    let groupName = $groupNode.kids[0].raw
-    if groupName == "metacore":
-      for k in groupNode.kids[1].kids:
-        let
-          name = $k.kids[0].raw
-          value = UpfileStr($k.kids[1].raw)
-        case name
+  p.parenLoop:
+    let groupName = $p.parseAsciiWord()
+    case groupName
+    of "metacore":
+      p.parenLoop:
+        let dataName = $p.parseAsciiWord()
+        case dataName
         of "name":
-          result.core.name = value.upfileUnescape()
+          result.core.name = p.takeString()
+          p.expectChar(';')
         of "index":
-          result.core.index = value.upfileUnescape().parseInt().ArchiveIndex
+          result.core.index = p.takeInt().ArchiveIndex
+          p.expectChar(';')
         of "time":
-          result.core.time = value.upfileUnescape().parseTime("yyyy-MM-dd'T'HH:mm:sszzz", utc()).utc()
+          result.core.time = p.takeString().parseTime("yyyy-MM-dd'T'HH:mm:sszzz", utc()).utc()
+          p.expectChar(';')
         else:
-          raiseAssert "Unexpected metacore field: " & name
-    elif groupName == "extra":
-      for k in groupNode.kids[1].kids:
-        let name = $k.kids[0].raw
-        case name
+          raiseAssert "Unexpected metacore field: " & dataName
+    of "extra":
+      p.parenLoop:
+        let dataName = $p.parseAsciiWord()
+        case dataName
         of "version":
-          result.extra.version = some UpfileStr($k.kids[1].raw).upfileUnescape()
+          result.extra.version = some p.takeString()
+          p.expectChar(';')
         of "tags":
           var tags = newSeq[string]()
-          for t in k.kids[1].kids:
-            tags.add(upfileUnescape(UpfileStr($t.raw)))
+          p.parenLoop:
+            tags.add(p.takeString())
+            p.expectChar(';')
           result.extra.tags = some tags
         of "custom":
-          result.extra.custom = some upfileUnescape(UpfileStr($k.kids[1].raw))
+          result.extra.custom = some p.takeString()
+          p.expectChar(';')
         else:
-          raiseAssert "unexpected extra field: " & name
+          raiseAssert "Unexpected extra field: " & dataName
     else:
       raiseAssert "Unexpected metacore group: " & groupName
 
+iterator iterMetadata*(data: openArray[char]): ArchiveMetadata =
+  if data.len() > 0:
+    var p = data.toSlice()
+    p.skipWhitespace()
+    while not p.atEof():
+      yield p.parseMetadata()
+      p.skipWhitespace()
+
 
 when isMainModule:
+  import std/[sugar,]
+
   var writer = UpfileWriter(buff : newString(0), pretty : true)
   writer.putMetadata(ArchiveCoreMetadata(
     name : "test",
@@ -93,8 +108,9 @@ when isMainModule:
     time : now().utc(),
   ), ArchiveExtraMetadata(
     tags : some @["$test"],
+    version : some "v1.5.2-4",
     custom : some "test $;()"
   ))
 
   echo writer.buff
-  echo parseNthEntityInUpfile(writer.buff, 0).parseMetadata()
+  echo takeNthEntityInUpfile(writer.buff, 0).dup.parseMetadata()

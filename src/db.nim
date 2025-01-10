@@ -48,8 +48,8 @@ proc restoreArchive(db: var DbCtx, archiveIndex: ArchiveIndex, toDir: string) =
   db.archiveDb.restoreArchive(archiveIndex, toDir)
 
 iterator iterMetadata(db: DbCtx): ArchiveMetadata =
-  for x in iterUpfileEntities(db.metacoreWriter.buff):
-    yield x.parseMetadata()
+  for x in db.metacoreWriter.buff.iterMetadata():
+    yield x
 
 
 proc save(db: DbCtx) =
