@@ -13,7 +13,7 @@ type
 
   StrSlice* = object
     p*: ptr UncheckedArray[char]
-    z*: ptr UncheckedArray[char] # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
+    z*: pointer # having the end pointer is more efficient than storing the length as it saves an operation during `inc`
 
 
 proc len*(x: StrSlice): int {.inline.} =
