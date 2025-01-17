@@ -78,14 +78,14 @@ template withParens*(p: var StrSlice, body: untyped): untyped =
   p.expectChar(')')
 
 
-proc parseAsciiWord*(p: var StrSlice): StrSlice =
+proc takeAsciiWord*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
   result = StrSlice(p : p.p)
   while p.p[0].isAlphaAscii():
     inc p
   result.z = p.p
 
-proc parseAnyNonTerm*(p: var StrSlice): StrSlice =
+proc takeAnyNonTerm*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
   result = StrSlice(p : p.p)
   while not p.p[0].isSpaceAscii() and p.p[0] notin TermChars:
@@ -93,10 +93,10 @@ proc parseAnyNonTerm*(p: var StrSlice): StrSlice =
   result.z = p.p
 
 proc takeInt*(p: var StrSlice): int {.inline.} =
-  parseInt($p.parseAnyNonTerm())
+  parseInt($p.takeAnyNonTerm())
 
 proc takeString*(p: var StrSlice): string {.inline.} =
-  upfileUnescape(UpfileStr($p.parseAnyNonTerm()))
+  upfileUnescape(UpfileStr($p.takeAnyNonTerm()))
 
 proc skipScope*(p: var StrSlice): StrSlice =
   p.skipWhitespace()

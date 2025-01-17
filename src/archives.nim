@@ -337,45 +337,45 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
 
 
 proc takePerms(p: var StrSlice): set[FilePermission] {.inline.} =
-  cast[set[FilePermission]](parseOctInt($p.parseAnyNonTerm()).uint16)
+  cast[set[FilePermission]](parseOctInt($p.takeAnyNonTerm()).uint16)
 
-proc parseDir(p: var StrSlice): ArchiveDirPath {.inline.} =
+proc takeDir(p: var StrSlice): ArchiveDirPath {.inline.} =
   let
     perms = p.takePerms()
     path = p.takeString()
   p.expectChar(';')
   (path : path, perms : perms)
 
-proc parseFile(p: var StrSlice): tuple[path: ArchiveFilePath, isSmall: bool] {.inline.} =
+proc takeFile(p: var StrSlice): tuple[path: ArchiveFilePath, isSmall: bool] {.inline.} =
   let
-    isSmall = $p.parseAsciiWord() == "s"
+    isSmall = $p.takeAsciiWord() == "s"
     perms = p.takePerms()
     dirIdx = p.takeInt().DirIndex
     name = p.takeString()
   (path : (name : name, dirIdx : dirIdx, perms : perms), isSmall : isSmall)
 
-proc parseArchive(p: var StrSlice): ArchiveEntry =
+proc takeArchive(p: var StrSlice): ArchiveEntry =
   result = ArchiveEntry()
   p.parenLoop:
-    let groupName = p.parseAsciiWord()
+    let groupName = p.takeAsciiWord()
     case $groupName
     of "dirs":
       p.parenLoop:
-        result.dirs.add p.parseDir()
+        result.dirs.add p.takeDir()
     of "files":
       p.parenLoop:
-        var nodeKind = p.parseAsciiWord()
+        var nodeKind = p.takeAsciiWord()
         case $nodeKind
         of "i":
           let
-            intervalEnds = $p.parseAnyNonTerm()
+            intervalEnds = $p.takeAnyNonTerm()
             comma = intervalEnds.find(',')
             a = parseInt(intervalEnds[0 ..< comma])
             b = parseInt(intervalEnds[comma + 1 ..< intervalEnds.len()])
           var paths = newSeq[ArchiveFilePath]()
           var i = a
           p.parenLoop:
-            let info = p.parseFile()
+            let info = p.takeFile()
             paths.add(info.path)
             if info.isSmall:
               result.smallFiles.incl(i)
@@ -396,7 +396,7 @@ proc parseArchive(p: var StrSlice): ArchiveEntry =
         of "g":
           let
             fileId = p.takeInt().FileIndex
-            info = p.parseFile()
+            info = p.takeFile()
           p.expectChar(';')
           result.singles.add(ArchiveSingleFile(
             index : fileId,
@@ -415,7 +415,7 @@ iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =
     var p = data.toSlice()
     p.skipWhitespace()
     while not p.atEof():
-      yield p.parseArchive()
+      yield p.takeArchive()
       p.skipWhitespace()
 
 

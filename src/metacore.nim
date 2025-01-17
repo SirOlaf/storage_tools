@@ -48,14 +48,14 @@ proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = defaul
         if extra.custom.isSome():
           x.field "custom", extra.custom.get()
 
-proc parseMetadata*(p: var StrSlice): ArchiveMetadata =
+proc takeMetadata*(p: var StrSlice): ArchiveMetadata =
   result = ArchiveMetadata()
   p.parenLoop:
-    let groupName = $p.parseAsciiWord()
+    let groupName = $p.takeAsciiWord()
     case groupName
     of "metacore":
       p.parenLoop:
-        let dataName = $p.parseAsciiWord()
+        let dataName = $p.takeAsciiWord()
         case dataName
         of "name":
           result.core.name = p.takeString()
@@ -70,7 +70,7 @@ proc parseMetadata*(p: var StrSlice): ArchiveMetadata =
           raiseAssert "Unexpected metacore field: " & dataName
     of "extra":
       p.parenLoop:
-        let dataName = $p.parseAsciiWord()
+        let dataName = $p.takeAsciiWord()
         case dataName
         of "version":
           result.extra.version = some p.takeString()
@@ -94,7 +94,7 @@ iterator iterMetadata*(data: openArray[char]): ArchiveMetadata =
     var p = data.toSlice()
     p.skipWhitespace()
     while not p.atEof():
-      yield p.parseMetadata()
+      yield p.takeMetadata()
       p.skipWhitespace()
 
 
@@ -113,4 +113,4 @@ when isMainModule:
   ))
 
   echo writer.buff
-  echo takeNthEntityInUpfile(writer.buff, 0).dup.parseMetadata()
+  echo takeNthEntityInUpfile(writer.buff, 0).dup.takeMetadata()
