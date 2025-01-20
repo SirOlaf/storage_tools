@@ -45,6 +45,7 @@ proc upfileEscape*(x: string): UpfileStr =
     ("(", "$p"),
     (")", "$b"),
     (";", "$c"),
+    ("\n", "$n")
   ).UpfileStr
 
 proc upfileUnescape*(x: UpfileStr): string =
@@ -54,11 +55,12 @@ proc upfileUnescape*(x: UpfileStr): string =
     ("$p", "("),
     ("$b", ")"),
     ("$c", ";"),
+    ("$n", "\n")
   )
 
 
 proc skipWhitespace*(p: var StrSlice) =
-  while p.p[0].isSpaceAscii():
+  while p.p[0] in {' ', '\n'}:
     inc p
 
 proc expectChar*(p: var StrSlice, c: char) =
@@ -88,7 +90,7 @@ proc takeAsciiWord*(p: var StrSlice): StrSlice =
 proc takeAnyNonTerm*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
   result = StrSlice(p : p.p)
-  while not p.p[0].isSpaceAscii() and p.p[0] notin TermChars:
+  while p.p[0] notin {' ', '\n'} and p.p[0] notin TermChars:
     inc p
   result.z = p.p
 
@@ -101,17 +103,16 @@ proc takeString*(p: var StrSlice): string {.inline.} =
 proc skipScope*(p: var StrSlice): StrSlice =
   p.skipWhitespace()
   result = StrSlice(p : p.p)
-  p.expectChar('(')
-  var depth = 1
-  while true:
-    if p.p[0] == '(':
-      inc depth
-    elif p.p[0] == ')':
-      dec depth
-      if depth == 0:
-        break
-    inc p
-  p.expectChar(')')
+  p.withParens:
+    var depth = 1
+    while true:
+      if p.p[0] == '(':
+        inc depth
+      elif p.p[0] == ')':
+        dec depth
+        if depth == 0:
+          break
+      inc p
   result.z = p.p
 
 template parenLoop*(p: var StrSlice, body: untyped): untyped =
@@ -180,7 +181,12 @@ template entity*(p: var UpfileWriter, body: untyped): untyped =
   p.scope:
     body
 
+
+proc isValidGroupName*(x: string): bool =
+  x.allCharsInSet(Letters)
+
 template group*(p: var UpfileWriter, name: string, body: untyped): untyped =
+  doAssert name.isValidGroupName()
   p.writeRaw(name)
   p.scope:
     body
