@@ -206,7 +206,7 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
         archive.emptyFiles.add((fileName, fileDir.dirPathToIdx(), perms))
       else:
         let fileIndex = db.fileDb.insertFile(folderPath.joinPath(filePath))
-        if db.fileDb.entries[fileIndex].isInSmallBlock:
+        if db.fileDb.chunks[0].raw[fileIndex].isInSmallBlock:
           archive.smallFiles.incl(fileIndex)
 
         let node = newDoublyLinkedNode((fileName, fileDir.dirPathToIdx(), perms))
@@ -319,7 +319,7 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
 
   var smallFiles = (indices : newSeq[FileIndex](), fullPaths : newSeq[tuple[path: string, perms: set[FilePermission]]]())
   for x in archive.singles:
-    if db.fileDb.entries[x.index].isInSmallBlock():
+    if db.fileDb.chunks[0].raw[x.index].isInSmallBlock():
       smallFiles.indices.add(x.index)
       smallFiles.fullPaths.add((x.path.makeFilePath(), x.path.perms))
     else:
@@ -328,7 +328,7 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
   for x in archive.intervals:
     for fileIndex in x.a .. x.b:
       let i = fileIndex - x.a
-      if db.filedb.entries[fileIndex].isInSmallBlock():
+      if db.filedb.chunks[0].raw[fileIndex].isInSmallBlock():
         smallFiles.indices.add(fileIndex)
         smallFiles.fullPaths.add((path : x.paths[i].makeFilePath(), perms : x.paths[i].perms))
       else:

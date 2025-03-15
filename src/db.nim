@@ -54,7 +54,12 @@ iterator iterMetadata(db: DbCtx): ArchiveMetadata =
 
 proc save(db: DbCtx) =
   writeFile(db.archiveDb.fileDb.dbPath.joinPath(archivesUpName), db.archiveDb.writer.buff)
-  writeFile(db.archiveDb.fileDb.dbPath.joinPath(metacoreUpName), db.metacoreWriter.buff)
+
+  var metaWriter = UpfileWriter(buff : "", pretty : true)
+  for x in db.metacoreWriter.buff.iterMetadata():
+    metaWriter.putMetadata(x.core, x.extra)
+  writeFile(db.archiveDb.fileDb.dbPath.joinPath(metacoreUpName), metaWriter.buff)
+
   db.archiveDb.fileDb.save()
 
 
@@ -80,7 +85,7 @@ when isMainModule:
     echo meta
 
   for i in 0 ..< dbSize:
-    if db.archiveDb.fileDb.entries[i].fileSize == 0:
+    if db.archiveDb.fileDb.chunks[0].raw[i].fileSize == 0:
       echo i
       break
 
