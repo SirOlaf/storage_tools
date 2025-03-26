@@ -18,6 +18,16 @@ const
   StoreMidFolderFileCount = StoreInnerFolderCount * StoreInnerFolderFileCount
 
 
+# Every storage layer contains a metadata file containing hashes.
+# The bottom layer stores hashes for every file it contains
+# The middle layer stores hashes for every bottom layer metadata file it contains
+# The top layer stores hashes for every middle layer metadata file it contains and
+#   should be treated the same as the other top level upfiles (archives, metacore, ...)
+# A goal of this design is to allow (low overhead) distributing one or more partial file stores to be reassembled or
+#   used as is, with every partial store having enough information to verify data integrity as long as
+#   the top level upfile is available.
+
+
 type
   BlockId* = uint32
 
