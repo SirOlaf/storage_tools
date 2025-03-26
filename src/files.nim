@@ -10,6 +10,7 @@ import std/[
 import crunchy
 import zstd/[compress, decompress]
 
+import blockstore
 import crypto
 
 
@@ -27,21 +28,12 @@ const
   shiftBlockOffset = 11
   maskBlockOffset = (1 shl (shiftBlockOffset + 1)) - 1
 
-# Every bottom level folder contains 1000 files, mid level folders each contain 100 bottom folders.
-# Top level store contains an arbitrary number of mid level folders.
-# Thus, every mid level folder will contain a total of 100k files
-const
-  StoreInnerFolderCount = 100
-  StoreInnerFolderFileCount = 1000
-  StoreMidFolderFileCount = StoreInnerFolderCount * StoreInnerFolderFileCount
-
 
 # TODO: Construct a flat hash index to be stored in a file later. Hash -> FileIndex to check for file existence quicker
 #       Current plan for the structure would be to imply a tree of 2 subdivisions per crc32 byte with the implied leaf nodes acting as heads for linked lists
 #       May be turned into a full tree if this isn't fast enough
 
 type
-  BlockId = uint32
   FileIndex* = int
 
   FileEntry* {.packed.} = object
@@ -68,10 +60,10 @@ type
     path: string
 
   FileDb* = object
+    store*: BlockStore
     chunks*: seq[FileDbChunk]
     smallFileQueue: seq[SmallFileInfo]
     dbPath*: string
-    storePath*: string # stored separately from dbPath in preparation for a detached usecase
     knownCrcs: HashSet[uint32]
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextBlockId: BlockId
@@ -160,32 +152,13 @@ proc advanceFileIndex(db: var FileDb): FileIndex =
   inc db.nextEntryIndex
 
 
-proc calcMidFolderId(blockId: BlockId): int {.inline.} =
-  let blockId = blockId.int - 1
-  blockId div StoreMidFolderFileCount
-
-proc calcBottomFolderId(blockId: BlockId): int {.inline.} =
-  let blockId = blockId.int - 1
-  (blockId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
-
-
-proc blockIdToStoreDir(db: FileDb, blockId: BlockId): string =
-  let
-    midFolderId = calcMidFolderId(blockId)
-    bottomFolderId = calcBottomFolderId(blockId)
-  db.storePath.joinPath($midFolderId).joinPath($bottomFolderId)
-
-proc blockIdToStorePath(db: FileDb, blockId: BlockId): string =
-  db.blockIdToStoreDir(blockid).joinPath($blockId)
-
 proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
   # TODO: Use memfiles here too?
   let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
-  createDir(db.blockIdToStoreDir(blockId))
-  writeFile(db.blockIdToStorePath(blockId), encryptedData)
+  db.store.submitRawBlockToStore(blockid, encryptedData)
 
 proc loadBlockFromStore(db: FileDb, blockId: BlockId): seq[byte] =
-  var inData = readFile(db.blockIdToStorePath(blockId))
+  var inData = db.store.loadRawBlockFromStore(blockId)
   db.masterKey.decryptData(blockId.SubkeyId, inData.toOpenArrayByte(inData.low, inData.high))
 
 # TODO: Maybe return slices instead
@@ -402,9 +375,11 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
 
   var saltZero = chunks[0].salt # TODO: Derive a fresh master key for each chunk?
   result = FileDb(
+    store : BlockStore(
+      path : storePath,
+    ),
     chunks : ensureMove chunks,
     dbPath : dbPath,
-    storePath : storePath,
     masterKey : deriveMasterKey(password, saltZero),
     knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
