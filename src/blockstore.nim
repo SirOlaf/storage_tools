@@ -19,6 +19,7 @@ type
   BlockId* = uint32
   BlockStore* = object
     path*: string
+    nextBlockId*: BlockId
 
 
 
@@ -31,6 +32,11 @@ proc calcBottomFolderId(blockId: BlockId): int {.inline.} =
   (blockId mod StoreMidFolderFileCount) div StoreInnerFolderFileCount
 
 
+proc advanceBlockId(store: var BlockStore): BlockId =
+  result = store.nextBlockId
+  inc store.nextBlockId
+
+
 proc blockIdToStoreDir(store: BlockStore, blockId: BlockId): string =
   let
     midFolderId = calcMidFolderId(blockId)
@@ -41,9 +47,15 @@ proc blockIdToStorePath(store: BlockStore, blockId: BlockId): string =
   store.blockIdToStoreDir(blockid).joinPath($blockId)
 
 
-proc submitRawBlockToStore*(store: BlockStore, blockId: BlockId, raw: openArray[byte]) =
+proc requestBlockId*(store: var BlockStore): BlockId =
+  store.advanceBlockId()
+
+proc submitRawBlockToStore*(store: var BlockStore, blockId: BlockId, raw: openArray[byte]) =
   createDir(store.blockIdToStoreDir(blockId))
   writeFile(store.blockIdToStorePath(blockId), raw)
 
 proc loadRawBlockFromStore*(store: BlockStore, blockId: BlockId): string =
   readFile(store.blockIdToStorePath(blockId))
+
+proc save*(store: BlockStore) =
+  discard

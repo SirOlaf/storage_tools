@@ -66,7 +66,6 @@ type
     dbPath*: string
     knownCrcs: HashSet[uint32]
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
-    nextBlockId: BlockId
     nextEntryIndex: FileIndex
     masterKey: MasterKey
 
@@ -143,19 +142,16 @@ proc searchTailIndex(db: FileDb): FileIndex =
       return i
   raiseAssert "Failed to find tail index"
 
-proc advanceBlockId(db: var FileDb): BlockId =
-  result = db.nextBlockId
-  inc db.nextBlockId
-
 proc advanceFileIndex(db: var FileDb): FileIndex =
   result = db.nextEntryIndex
   inc db.nextEntryIndex
 
 
-proc submitFileToStore(db: FileDb, blockId: BlockId, data: openArray[byte]) =
+proc submitFileToStore(db: var FileDb, data: openArray[byte]): BlockId =
   # TODO: Use memfiles here too?
-  let encryptedData = db.masterKey.encryptData(blockId.SubkeyId, data)
-  db.store.submitRawBlockToStore(blockid, encryptedData)
+  result = db.store.requestBlockId()
+  let encryptedData = db.masterKey.encryptData(result.SubkeyId, data)
+  db.store.submitRawBlockToStore(result, encryptedData)
 
 proc loadBlockFromStore(db: FileDb, blockId: BlockId): seq[byte] =
   var inData = db.store.loadRawBlockFromStore(blockId)
@@ -267,9 +263,7 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
       finalSize : relevantSize.uint,
     ))
   else:
-    entry.blockId = db.advanceBlockId()
-    db.submitFileToStore(
-      entry.blockid,
+    entry.blockId = db.submitFileToStore(
       (
         if shouldCompress:
           compressedData.toOpenArray(compressedData.low, compressedData.high)
@@ -298,7 +292,6 @@ proc commit*(db: var FileDb) =
   if bucket[0] != 0:
     filledBuckets.add(bucket)
 
-  var blockId = db.advanceBlockId()
   for bucket in filledBuckets:
     var page = newSeq[byte](smallBlockSize())
     var pageOffset = 0u64
@@ -311,12 +304,11 @@ proc commit*(db: var FileDb) =
         copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
 
       db.chunks[0].raw[info.index].rawBlockOffset = pageOffset.uint16
-      db.chunks[0].raw[info.index].blockId = blockid
       inc pageOffset, db.chunks[0].raw[info.index].fileSize
 
-    db.submitFileToStore(blockId, page.toOpenArray(page.low, pageOffset.int - 1))
-
-    inc blockId
+    let assignedBlockId = db.submitFileToStore(page.toOpenArray(page.low, pageOffset.int - 1))
+    for info in bucket[1]:
+      db.chunks[0].raw[info.index].blockId = assignedBlockId
 
   reset db.smallFileQueue
 
@@ -384,7 +376,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
   )
-  result.nextBlockId = result.searchNextBlockId()
+  result.store.nextBlockId = result.searchNextBlockId()
   result.nextEntryIndex = result.searchTailIndex()
 
   for i in 0 ..< result.nextEntryIndex:
@@ -392,6 +384,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     result.knownHashes.incl(result.chunks[0].raw[i].sha256)
 
 proc save*(db: FileDb) =
+  db.store.save()
   var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
   copyMem(addr outBuff[0], db.chunks[0].raw, sizeof(array[dbSize, FileEntry]))
   copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.chunks[0].salt.string[0], saltSize)
