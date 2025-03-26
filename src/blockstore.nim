@@ -1,6 +1,9 @@
 import std/[
   os,
+  strutils,
 ]
+
+import crunchy
 
 import upfiles
 
@@ -17,6 +20,11 @@ const
 
 type
   BlockId* = uint32
+
+  BottomLevelMetaEntry = object
+    id: BlockId # store id to allow archive reconstruction+data integrity using a partial block store
+    sha256: array[32, byte]
+
   BlockStore* = object
     path*: string
     nextBlockId*: BlockId
@@ -47,11 +55,47 @@ proc blockIdToStorePath(store: BlockStore, blockId: BlockId): string =
   store.blockIdToStoreDir(blockid).joinPath($blockId)
 
 
+proc putBottomLevelMeta(x: var UpfileWriter, meta: BottomLevelMetaEntry) =
+  x.entity:
+    x.group "low":
+      x.field "id", $meta.id
+      x.field "sha", meta.sha256.toHex()
+
+proc takeBottomLevelMetaEntry(p: var StrSlice): BottomLevelMetaEntry =
+  result = BottomLevelMetaEntry()
+  p.fieldLoop(groupName):
+    case groupName
+    of "low":
+      p.fieldLoop(fieldName):
+        case fieldName
+        of "id":
+          result.id = p.takeInt().uint32
+          p.expectChar(';')
+        of "sha":
+          let buff = p.takeString().parseHexStr()
+          copyMem(addr result.sha256[0], addr buff[0], result.sha256.len())
+          p.expectChar(';')
+        else:
+          raiseAssert "Unexpected low field: " & fieldName
+    else:
+      raiseAssert "Unexpected bottom meta group: " & groupName
+
+iterator iterBottomMeta*(data: openArray[char]): BottomLevelMetaEntry =
+  if data.len() > 0:
+    var p = data.toSlice()
+    p.skipWhitespace()
+    while not p.atEof():
+      yield p.takeBottomLevelMetaEntry()
+      p.skipWhitespace()
+
+
 proc requestBlockId*(store: var BlockStore): BlockId =
   store.advanceBlockId()
 
 proc submitRawBlockToStore*(store: var BlockStore, blockId: BlockId, raw: openArray[byte]) =
-  createDir(store.blockIdToStoreDir(blockId))
+  let bottomDirPath = store.blockIdToStoreDir(blockId)
+  createDir(bottomDirPath)
+
   writeFile(store.blockIdToStorePath(blockId), raw)
 
 proc loadRawBlockFromStore*(store: BlockStore, blockId: BlockId): string =
@@ -59,3 +103,21 @@ proc loadRawBlockFromStore*(store: BlockStore, blockId: BlockId): string =
 
 proc save*(store: BlockStore) =
   discard
+
+
+when isMainModule:
+  import std/[sugar,]
+
+  var x = UpfileWriter(pretty : true)
+  x.putBottomLevelMeta(BottomLevelMetaEntry(
+    sha256 : sha256("test"),
+    id : 1,
+  ))
+  x.putBottomLevelMeta(BottomLevelMetaEntry(
+    sha256 : sha256("test2"),
+    id : 2,
+  ))
+
+  echo x.buff
+  echo x.buff.takeNthEntityInUpfile(0).dup().takeBottomLevelMetaEntry()
+  echo x.buff.takeNthEntityInUpfile(1).dup().takeBottomLevelMetaEntry()

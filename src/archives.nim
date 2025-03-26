@@ -303,6 +303,7 @@ proc restoreArchive*(db: var ArchiveDb, archiveIndex: ArchiveIndex, toDir: strin
         createdDirs.incl(p)
     createDir(p)
     setFilePermissions(p, dir.perms)
+  createDir(toDir)
 
   template makeFilePath(p: ArchiveFilePath): string =
     if p.dirIdx == NoDirIdx:
@@ -356,16 +357,14 @@ proc takeFile(p: var StrSlice): tuple[path: ArchiveFilePath, isSmall: bool] {.in
 
 proc takeArchive(p: var StrSlice): ArchiveEntry =
   result = ArchiveEntry()
-  p.parenLoop:
-    let groupName = p.takeAsciiWord()
-    case $groupName
+  p.fieldLoop(groupName):
+    case groupName
     of "dirs":
       p.parenLoop:
         result.dirs.add p.takeDir()
     of "files":
-      p.parenLoop:
-        var nodeKind = p.takeAsciiWord()
-        case $nodeKind
+      p.fieldLoop(nodeKind):
+        case nodeKind
         of "i":
           let
             intervalEnds = $p.takeAnyNonTerm()
@@ -407,7 +406,7 @@ proc takeArchive(p: var StrSlice): ArchiveEntry =
         else:
           raiseAssert "Unknown file tag: " & $nodeKind
     else:
-      raiseAssert "Unknown archive group: " & $groupName
+      raiseAssert "Unknown archive group: " & groupName
   result.structureHash = result.hashStructure()
 
 iterator iterArchivesInUpfile*(data: openArray[char]): ArchiveEntry =

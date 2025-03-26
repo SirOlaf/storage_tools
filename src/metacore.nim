@@ -27,10 +27,6 @@ type
 
 
 
-proc field(x: var UpfileWriter, name, value: string) =
-  x.terminated:
-    x.writeRaw upfileEscape(name).string & " " & upfileEscape(value).string
-
 proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = default(ArchiveExtraMetadata)) =
   x.entity:
     x.group "metacore":
@@ -50,12 +46,10 @@ proc putMetadata*(x: var UpfileWriter, data: ArchiveCoreMetadata, extra = defaul
 
 proc takeMetadata*(p: var StrSlice): ArchiveMetadata =
   result = ArchiveMetadata()
-  p.parenLoop:
-    let groupName = $p.takeAsciiWord()
+  p.fieldLoop(groupName):
     case groupName
     of "metacore":
-      p.parenLoop:
-        let dataName = $p.takeAsciiWord()
+      p.fieldLoop(dataName):
         case dataName
         of "name":
           result.core.name = p.takeString()
@@ -69,8 +63,7 @@ proc takeMetadata*(p: var StrSlice): ArchiveMetadata =
         else:
           raiseAssert "Unexpected metacore field: " & dataName
     of "extra":
-      p.parenLoop:
-        let dataName = $p.takeAsciiWord()
+      p.fieldLoop(dataName):
         case dataName
         of "version":
           result.extra.version = some p.takeString()

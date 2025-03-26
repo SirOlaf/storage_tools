@@ -120,6 +120,11 @@ template parenLoop*(p: var StrSlice, body: untyped): untyped =
     while p.peekChar() != ')':
       body
 
+template fieldLoop*(p: var StrSlice, fieldNameVar: untyped, body: untyped): untyped =
+  p.parenLoop:
+    let `fieldNameVar` = $p.takeAsciiWord()
+    body
+
 
 iterator iterUpfileEntities*(data: openArray[char]): StrSlice =
   if data.len() > 0:
@@ -194,6 +199,10 @@ template group*(p: var UpfileWriter, name: string, body: untyped): untyped =
 template terminated*(p: var UpfileWriter, body: untyped): untyped =
   body
   p.terminator()
+
+proc field*(x: var UpfileWriter, name, value: string) =
+  x.terminated:
+    x.writeRaw upfileEscape(name).string & " " & upfileEscape(value).string
 
 
 
