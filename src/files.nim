@@ -137,9 +137,12 @@ proc `fileSize=`(entry: var FileEntry, x: uint64) {.inline.} =
 
 
 proc searchNextBlockId(db: FileDb): BlockId =
+  var highestBlockId = 0
   for i in 0 ..< dbSize:
     if db.chunks[0].raw[i].fileSize == 0:
-      return BlockId(i + 1)
+      return BlockId(highestBlockId + 1)
+    elif db.chunks[0].raw[i].blockId.int > highestBlockId:
+      highestBlockId = db.chunks[0].raw[i].blockId.int
   raiseAssert "Failed to find a block id"
 
 proc searchTailIndex(db: FileDb): FileIndex =
