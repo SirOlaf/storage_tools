@@ -5,6 +5,7 @@ import std/[
   sets,
   memfiles,
   tables,
+  options,
 ]
 
 import crunchy
@@ -384,7 +385,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     result.knownHashes.incl(result.chunks[0].raw[i].sha256)
 
 proc save*(db: var FileDb) =
-  db.store.save()
+  db.store.save(some db.dbPath)
   var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
   copyMem(addr outBuff[0], db.chunks[0].raw, sizeof(array[dbSize, FileEntry]))
   copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.chunks[0].salt.string[0], saltSize)

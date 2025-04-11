@@ -201,14 +201,15 @@ proc submitRawBlockToStore*(store: var BlockStore, blockId: BlockId, raw: openAr
 proc loadRawBlockFromStore*(store: BlockStore, blockId: BlockId): string =
   readFile(store.blockIdToStorePath(blockId))
 
-proc save*(store: var BlockStore) =
+proc save*(store: var BlockStore, tophashFileDir: Option[string]) =
   if not store.activeLayer.isSome():
     return
+  let tophashFilePath = if tophashFileDir.isSome(): tophashFileDir.unsafeGet().joinPath(hashfileName) else: store.path.joinPath(hashfileName)
   store.commitBottomHashFile()
   store.commitMiddleHashFile()
   var topHashes = newSeq[HashEntry]()
-  if fileExists(store.path.joinPath(hashfileName)):
-    topHashes = loadHashFile(store.path.joinPath(hashfileName))
+  if fileExists(tophashFilePath):
+    topHashes = loadHashFile(tophashFilePath)
   for middle in store.modifiedMiddleHashes:
     var found = false
     for i in 0 ..< topHashes.len():
@@ -225,7 +226,7 @@ proc save*(store: var BlockStore) =
     ))
   var topWriter = UpfileWriter(pretty : true)
   topWriter.putHashEntries(topHashes)
-  writeFile(store.path.joinPath(hashfileName), topWriter.buff)
+  writeFile(tophashFilePath, topWriter.buff)
   store.modifiedMiddleHashes.setLen(0)
 
 
