@@ -383,7 +383,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     result.knownCrcs.incl(result.chunks[0].raw[i].crc32)
     result.knownHashes.incl(result.chunks[0].raw[i].sha256)
 
-proc save*(db: FileDb) =
+proc save*(db: var FileDb) =
   db.store.save()
   var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
   copyMem(addr outBuff[0], db.chunks[0].raw, sizeof(array[dbSize, FileEntry]))

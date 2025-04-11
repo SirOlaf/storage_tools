@@ -52,7 +52,7 @@ iterator iterMetadata(db: DbCtx): ArchiveMetadata =
     yield x
 
 
-proc save(db: DbCtx) =
+proc save(db: var DbCtx) =
   writeFile(db.archiveDb.fileDb.dbPath.joinPath(archivesUpName), db.archiveDb.writer.buff)
 
   var metaWriter = UpfileWriter(buff : "", pretty : true)
@@ -79,7 +79,7 @@ when isMainModule:
     )
   )
   removeDir("testfiles_out")
-  db.restoreArchive(insertedArchiveIdx, "testfiles_out")
+  #db.restoreArchive(insertedArchiveIdx, "testfiles_out")
 
   for meta in db.iterMetadata():
     echo meta
