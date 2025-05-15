@@ -6,6 +6,7 @@ import std/[
   memfiles,
   tables,
   options,
+  strutils,
 ]
 
 import crunchy
@@ -18,6 +19,7 @@ import crypto
 const
   dbSize* = 1_000_000 # 1 million entries per database
   internalSmallBlockSize = 4096
+  filedbExt = ".filedb"
 
 const
   shiftIsInSmallBlock = 15
@@ -69,6 +71,7 @@ type
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextEntryIndex: FileIndex
     masterKey: MasterKey
+    pwHash: PwHash
 
 
 doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
@@ -318,10 +321,9 @@ template transaction*(db: var FileDb, body: untyped): untyped =
   db.commit()
 
 
-proc allocNewFileDbChunk(path: string, password: string): FileDbChunk =
+proc allocNewFileDbChunk(path: string, pwHash: PwHash): FileDbChunk =
   let
     salt = generateSalt()
-    pwHash = hashPassword(password)
     buff = create(array[dbSize, FileEntry])
 
   FileDbChunk(
@@ -345,7 +347,7 @@ proc loadFileDbChunkFromFile(path: string, password: string): FileDbChunk =
   copyMem(addr storedSalt.string[0], addr fileData[sizeof(array[dbSize, FileEntry])], saltSize)
   copyMem(addr storedPwHash.asArray()[0], addr fileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
   if not verifyPassword(storedPwHash, password): # TODO: Should the hash be refreshed every time db is saved?
-    raiseAssert "Wrong password"
+    raiseAssert "Wrong password for filedb chunk " & path
 
   FileDbChunk(
     raw : buff,
@@ -357,14 +359,21 @@ proc loadFileDbChunkFromFile(path: string, password: string): FileDbChunk =
 
 # TODO: Don't keep password in memory for too long. Change key validation?
 proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
+  if sodiumInit() < 0:
+    echo "Sodium failed to init"
+    quit(1)
   createDir(storePath)
+  let pwHash = hashPassword(password)
 
   # TODO: Fully handle multiple db chunks
   var chunks = newSeq[FileDbChunk]()
-  if fileExists(dbPath.joinPath("1.filedb")):
-    chunks.add loadFileDbChunkFromFile(dbPath.joinPath("1.filedb"), password)
-  else:
-    chunks.add allocNewFileDbChunk(dbPath.joinPath("1.filedb"), password)
+  for path in walkPattern(dbPath.joinPath("*.filedb")):
+    let num = path.splitFile.name.parseInt()
+    let i = num - 1 # nums start at 1
+    if num > chunks.len(): chunks.setLen(num) # !! We allow gaps here but trying to access a chunk that isn't loaded must error
+    chunks[i] = loadFileDbChunkFromFile(dbPath.joinPath($num & filedbExt), password)
+  if chunks.len() == 0:
+    chunks.add allocNewFileDbChunk(dbPath.joinPath("1.filedb"), pwHash)
 
   var saltZero = chunks[0].salt # TODO: Derive a fresh master key for each chunk?
   result = FileDb(
@@ -376,6 +385,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     masterKey : deriveMasterKey(password, saltZero),
     knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
+    pwHash : pwHash,
   )
   result.store.nextBlockId = result.searchNextBlockId()
   result.nextEntryIndex = result.searchTailIndex()
@@ -386,11 +396,14 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
 
 proc save*(db: var FileDb) =
   db.store.save(some db.dbPath)
-  var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
-  copyMem(addr outBuff[0], db.chunks[0].raw, sizeof(array[dbSize, FileEntry]))
-  copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.chunks[0].salt.string[0], saltSize)
-  copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.chunks[0].pwHash.asArray()[0], pwHashSize)
-  writeFile(joinPath(db.dbPath, "1.filedb"), compress(outBuff))
+  for i in 0 ..< db.chunks.len():
+    if db.chunks[i].raw.isNil(): continue # skip chunks that aren't loaded
+    var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
+    copyMem(addr outBuff[0], db.chunks[i].raw, sizeof(array[dbSize, FileEntry]))
+    copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.chunks[i].salt.string[0], saltSize)
+    copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.chunks[i].pwHash.asArray()[0], pwHashSize)
+
+    writeFile(joinPath(db.dbPath, $(i + 1) & filedbExt), compress(outBuff))
 
 
 when isMainModule:
