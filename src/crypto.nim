@@ -4,6 +4,7 @@ import std/[
 ]
 
 import sodium/sodium_internal
+export sodiumInit
 
 
 const
