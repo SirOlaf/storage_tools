@@ -1,4 +1,4 @@
-{.passL: "/lib64/libsodium.so".}
+{.passL: "`pkg-config --cflags --libs libsodium`".}
 
 when defined(useFuthark):
   import futhark, os
