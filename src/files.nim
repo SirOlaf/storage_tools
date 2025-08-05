@@ -54,23 +54,20 @@ type
     index: int64
     finalSize: uint64
 
-  FileDbChunk* = object
-    raw*: ptr array[dbSize, FileEntry]
-    selfManaged: bool
-    # salt and password hash are appended to the end of the chunk
-    salt: Salt
-    pwHash: PwHash
-    path: string
-
+  FileEntryArray = array[dbSize, FileEntry]
+  RawChunks = object
+    raw: seq[ptr FileEntryArray]
   FileDb* = object
     store*: BlockStore
-    chunks*: seq[FileDbChunk]
+    rawChunks: RawChunks
     smallFileQueue: seq[SmallFileInfo]
     dbPath*: string
     knownCrcs: HashSet[uint32]
     knownHashes: HashSet[array[32, byte]] # TODO: Replace with something more efficient?
     nextEntryIndex: FileIndex
     masterKey: MasterKey
+    # salt and password hash are appended to the end of the first chunk
+    salt: Salt
     pwHash: PwHash
 
 
@@ -78,9 +75,8 @@ doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
 
 
 proc `=destroy`(db: FileDb) =
-  for chunk in db.chunks:
-    if chunk.selfManaged and chunk.raw != nil:
-      dealloc(chunk.raw)
+  for i in 0 ..< db.rawChunks.raw.len():
+    dealloc(db.rawChunks.raw[i])
 
 
 proc smallBlockSize(): uint64 {.inline.} = internalSmallBlockSize - secretstreamOverhead()
@@ -131,22 +127,47 @@ proc `fileSize=`(entry: var FileEntry, x: uint64) {.inline.} =
     entry.internalFileSize = (x shr shiftBlockOffset).uint32
 
 
-proc searchNextBlockId(db: FileDb): BlockId =
-  var highestBlockId = 0
-  for i in 0 ..< dbSize:
-    if db.chunks[0].raw[i].fileSize == 0:
-      return BlockId(highestBlockId + 1)
-    elif db.chunks[0].raw[i].blockId.int > highestBlockId:
-      highestBlockId = db.chunks[0].raw[i].blockId.int
-  raiseAssert "Failed to find a block id"
+proc responsibleChunkIdx(fileIdx: FileIndex): int {.inline.} =
+  fileIdx div dbSize
 
-proc searchTailIndex(db: FileDb): FileIndex =
+proc localFileIdx(fileIdx: FileIndex): int {.inline.} =
+  fileIdx mod dbSize
+
+proc `[]`*(db: FileDb, fileIdx: FileIndex): FileEntry =
+  db.rawChunks.raw[fileIdx.responsibleChunkIdx()][fileIdx.localFileIdx()]
+
+proc `[]`(db: var FileDb, fileIdx: FileIndex): var FileEntry =
+  db.rawChunks.raw[fileIdx.responsibleChunkIdx()][fileIdx.localFileIdx()]
+
+iterator iterAllFileEntries*(db: FileDb): FileEntry =
+  for i in 0 ..< db.rawChunks.raw.len():
+    for j in 0 ..< dbSize:
+      if db.rawChunks.raw[i][j].fileSize() == 0:
+        # This is ONLY proper if the chunks are fully saturated, as should be the case in normal usage
+        break
+      yield db.rawChunks.raw[i][j]
+
+proc searchTailIndex(chunks: RawChunks): FileIndex =
   for i in 0 ..< dbSize:
-    if db.chunks[0].raw[i].fileSize == 0:
-      return i
-  raiseAssert "Failed to find tail index"
+    if chunks.raw[^1][i].fileSize == 0:
+      return chunks.raw.high * dbSize + i
+  # The existing chunk is saturated and a new chunk hasn't been allocated yet.
+  # Pretend there is a new chunk at the end
+  return (chunks.raw.high + 1) * dbSize
+
+
+proc searchNextBlockId(db: FileDb): BlockId =
+  var highest = 0
+  for entry in db.iterAllFileEntries():
+    if entry.blockId.int > highest.int:
+      highest = entry.blockId.int
+  (highest + 1).BlockId # next id
+
 
 proc advanceFileIndex(db: var FileDb): FileIndex =
+  if db.nextEntryIndex.responsibleChunkIdx() >= db.rawChunks.raw.len():
+    # Allocate a new chunk if the tail is saturated
+    db.rawChunks.raw.add(create(array[dbSize, FileEntry]))
   result = db.nextEntryIndex
   inc db.nextEntryIndex
 
@@ -172,7 +193,7 @@ iterator iterSmallBlockDataByIndices(db: FileDb, blockId: BlockId, indices: seq[
   # TODO: The series of loops could be optimized into a single one by keeping the block around and acting on it instead
   var offsetsAndSizes = newSeq[tuple[offset, size: int]]()
   for i in indices:
-    let entry = db.chunks[0].raw[i]
+    let entry = db[i]
     if entry.blockId != blockId:
       raiseAssert "Expected files from block " & $blockId & " but got " & $entry.blockId
     if not entry.isInSmallBlock:
@@ -188,7 +209,7 @@ proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: s
   # TODO: This could be replaced by a sort algorithm to save on allocations and indirection (sort by blockId)
   var blockTable = initTable[BlockId, tuple[indices: seq[FileIndex], paths: seq[(string, set[FilePermission])]]]()
   for i in 0 ..< indices.len():
-    let blockId = db.chunks[0].raw[indices[i]].blockId
+    let blockId = db[indices[i]].blockId
     if blockId notin blockTable:
       blockTable[blockId] = (indices : @[indices[i]], paths : @[toPaths[i]])
     else:
@@ -197,7 +218,7 @@ proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: s
   for blockId, info in blockTable:
     var i = 0
     for data in db.iterSmallBlockDataByIndices(blockId, info.indices):
-      if db.chunks[0].raw[info.indices[i]].isCompressed:
+      if db[info.indices[i]].isCompressed:
         writeFile(info.paths[i][0], data.decompress())
       else:
         writeFile(info.paths[i][0], data)
@@ -206,12 +227,13 @@ proc restoreSmallFilesFromStore*(db: FileDb, indices: seq[FileIndex], toPaths: s
     doAssert i == info.paths.len()
 
 proc restoreBigFileFromStore*(db: FileDb, index: FileIndex, toPath: string, perms: set[FilePermission]) =
-  if db.chunks[0].raw[index].isInSmallBlock:
+  doAssert db[index].fileSize > 0, $index
+  if db[index].isInSmallBlock:
     raiseAssert "Expected a file that isn't part of a small block"
-  if db.chunks[0].raw[index].isCompressed:
-    writeFile(toPath, db.loadBlockFromStore(db.chunks[0].raw[index].blockId).decompress())
+  if db[index].isCompressed:
+    writeFile(toPath, db.loadBlockFromStore(db[index].blockId).decompress())
   else:
-    writeFile(toPath, db.loadBlockFromStore(db.chunks[0].raw[index].blockId))
+    writeFile(toPath, db.loadBlockFromStore(db[index].blockId))
   toPath.setFilePermissions(perms)
 
 
@@ -221,21 +243,17 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
   if rawPtr.size == 0:
     raiseAssert "Bad file size"
 
-  let crc32 = crc32(rawPtr.mem, rawPtr.size)
-
-  var
-    computedSha = false
-    sha256 = default(array[32, byte])
+  let
+    crc32 = crc32(rawPtr.mem, rawPtr.size)
+    sha256 = sha256(rawPtr.mem, rawPtr.size)
 
   if crc32 in db.knownCrcs:
-    sha256 = sha256(rawPtr.mem, rawPtr.size)
-    computedSha = true
-    for i in 0 ..< dbSize:
-      if db.chunks[0].raw[i].crc32 == crc32 and db.chunks[0].raw[i].sha256 == sha256:
+    var i = 0
+    for entry in db.iterAllFileEntries():
+      if entry.crc32 == crc32 and entry.sha256 == sha256:
         return i
+      inc i
 
-  if not computedSha:
-    sha256 = sha256(rawPtr.mem, rawPtr.size)
   db.knownCrcs.incl(crc32)
   db.knownHashes.incl(sha256)
 
@@ -275,7 +293,7 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
           cast[ptr UncheckedArray[byte]](rawPtr.mem).toOpenArray(0, rawPtr.size - 1)
       ),
     )
-  db.chunks[0].raw[result] = entry
+  db[result] = entry
 
 proc commit*(db: var FileDb) =
   var
@@ -301,18 +319,18 @@ proc commit*(db: var FileDb) =
     var pageOffset = 0u64
     for info in bucket[1]:
       let sourceData = readFile(info.sourcePath)
-      if db.chunks[0].raw[info.index].isCompressed:
+      if db[info.index].isCompressed:
         let outData = compress(sourceData.toOpenArrayByte(sourceData.low, sourceData.high))
         copyMem(addr page[pageOffset], addr outData[0], outData.len())
       else:
         copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
 
-      db.chunks[0].raw[info.index].rawBlockOffset = pageOffset.uint16
-      inc pageOffset, db.chunks[0].raw[info.index].fileSize
+      db[info.index].rawBlockOffset = pageOffset.uint16
+      inc pageOffset, db[info.index].fileSize
 
     let assignedBlockId = db.submitFileToStore(page.toOpenArray(page.low, pageOffset.int - 1))
     for info in bucket[1]:
-      db.chunks[0].raw[info.index].blockId = assignedBlockId
+      db[info.index].blockId = assignedBlockId
 
   reset db.smallFileQueue
 
@@ -320,42 +338,6 @@ template transaction*(db: var FileDb, body: untyped): untyped =
   body
   db.commit()
 
-
-proc allocNewFileDbChunk(path: string, pwHash: PwHash): FileDbChunk =
-  let
-    salt = generateSalt()
-    buff = create(array[dbSize, FileEntry])
-
-  FileDbChunk(
-    raw : buff,
-    selfManaged : true,
-    salt : salt,
-    pwHash : pwHash,
-    path : path,
-  )
-
-
-proc loadFileDbChunkFromFile(path: string, password: string): FileDbChunk =
-  var
-    buff = create(array[dbSize, FileEntry])
-    fileData = decompress(readFile(path))
-    storedSalt = default(Salt)
-    storedPwHash = default(PwHash)
-  storedSalt.string.setLen(saltSize)
-
-  copyMem(buff, addr fileData[0], sizeof(array[dbSize, FileEntry]))
-  copyMem(addr storedSalt.string[0], addr fileData[sizeof(array[dbSize, FileEntry])], saltSize)
-  copyMem(addr storedPwHash.asArray()[0], addr fileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
-  if not verifyPassword(storedPwHash, password): # TODO: Should the hash be refreshed every time db is saved?
-    raiseAssert "Wrong password for filedb chunk " & path
-
-  FileDbChunk(
-    raw : buff,
-    selfManaged : true,
-    salt : storedSalt,
-    pwHash : storedPwHash,
-    path : path,
-  )
 
 # TODO: Don't keep password in memory for too long. Change key validation?
 proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
@@ -365,44 +347,63 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
   createDir(storePath)
   let pwHash = hashPassword(password)
 
-  # TODO: Fully handle multiple db chunks
-  var chunks = newSeq[FileDbChunk]()
+  var
+    rawChunks = default(RawChunks)
+    storedSalt = default(Salt)
+    storedPwHash = default(PwHash)
+  storedSalt.string.setLen(saltSize)
   for path in walkPattern(dbPath.joinPath("*.filedb")):
     let num = path.splitFile.name.parseInt()
     let i = num - 1 # nums start at 1
-    if num > chunks.len(): chunks.setLen(num) # !! We allow gaps here but trying to access a chunk that isn't loaded must error
-    chunks[i] = loadFileDbChunkFromFile(dbPath.joinPath($num & filedbExt), password)
-  if chunks.len() == 0:
-    chunks.add allocNewFileDbChunk(dbPath.joinPath("1.filedb"), pwHash)
+    if num > rawChunks.raw.len(): rawChunks.raw.setLen(num)
+    let filedbFileData = decompress(readFile(path))
+    var buff = create(array[dbSize, FileEntry])
+    copyMem(buff, addr filedbFileData[0], sizeof(array[dbSize, FileEntry]))
+    rawChunks.raw[i] = buff
+    if i == 0:
+      copyMem(addr storedSalt.string[0], addr filedbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
+      copyMem(addr storedPwHash.asArray()[0], addr filedbFileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
 
-  var saltZero = chunks[0].salt # TODO: Derive a fresh master key for each chunk?
+  if rawChunks.raw.len() == 0:
+    storedPwHash = pwHash
+    storedSalt = generateSalt()
+    rawChunks.raw.add(create(array[dbSize, FileEntry]))
+
+    for i in 0 ..< dbSize - 2:
+      rawChunks.raw[0][i].fileSize = 1
+
+  else:
+    if not verifyPassword(storedPwHash, password):
+      raiseAssert "Wrong password"
+
   result = FileDb(
     store : BlockStore(
       path : storePath,
     ),
-    chunks : ensureMove chunks,
+    rawChunks : ensureMove rawChunks,
     dbPath : dbPath,
-    masterKey : deriveMasterKey(password, saltZero),
+    masterKey : deriveMasterKey(password, storedSalt),
     knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
-    pwHash : pwHash,
+    salt : storedSalt,
+    pwHash : storedPwHash,
   )
   result.store.nextBlockId = result.searchNextBlockId()
-  result.nextEntryIndex = result.searchTailIndex()
+  result.nextEntryIndex = result.rawChunks.searchTailIndex()
 
-  for i in 0 ..< result.nextEntryIndex:
-    result.knownCrcs.incl(result.chunks[0].raw[i].crc32)
-    result.knownHashes.incl(result.chunks[0].raw[i].sha256)
+  for entry in result.iterAllFileEntries():
+    result.knownCrcs.incl(entry.crc32)
+    result.knownHashes.incl(entry.sha256)
 
 proc save*(db: var FileDb) =
   db.store.save(some db.dbPath)
-  for i in 0 ..< db.chunks.len():
-    if db.chunks[i].raw.isNil(): continue # skip chunks that aren't loaded
-    var outBuff = newString(sizeof(array[dbSize, FileEntry]) + saltSize + pwHashSize)
-    copyMem(addr outBuff[0], db.chunks[i].raw, sizeof(array[dbSize, FileEntry]))
-    copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.chunks[i].salt.string[0], saltSize)
-    copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.chunks[i].pwHash.asArray()[0], pwHashSize)
-
+  for i in 0 ..< db.rawChunks.raw.len():
+    let buffSize = sizeof(array[dbSize, FileEntry]) + (if i == 0: saltSize + pwHashSize else: 0)
+    var outBuff = newString(buffSize)
+    copyMem(addr outBuff[0], db.rawChunks.raw[i], sizeof(array[dbSize, FileEntry]))
+    if i == 0:
+      copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.salt.string[0], saltSize)
+      copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
     writeFile(joinPath(db.dbPath, $(i + 1) & filedbExt), compress(outBuff))
 
 
@@ -425,10 +426,12 @@ when isMainModule:
         discard db.insertFile(x)
 
   var totalFiles = 0
-  for i in 0 ..< dbSize:
-    if db.chunks[0].raw[i].fileSize == 0:
+  var i = 0
+  for entry in db.iterAllFileEntries():
+    if entry.fileSize == 0:
       totalFiles = i
       break
+    inc i
   #  echo db.entries[i], " ", db.entries[i].isInSmallBlock, " ", db.entries[i].isCompressed, " ", db.entries[i].fileSize.int64.formatSize(), " ", db.entries[i].blockOffset
 
   echo "insert count: ", totalFiles

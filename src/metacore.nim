@@ -2,7 +2,6 @@
 
 import std/[
   times,
-  strutils,
   options,
 ]
 

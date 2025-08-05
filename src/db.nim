@@ -79,15 +79,19 @@ when isMainModule:
     )
   )
   removeDir("testfiles_out")
+
+  #for entry in db.archiveDb.fileDb.iterAllFileEntries():
+  #  echo entry
+
   #db.restoreArchive(insertedArchiveIdx, "testfiles_out")
 
   for meta in db.iterMetadata():
     echo meta
 
-  for i in 0 ..< dbSize:
-    if db.archiveDb.fileDb.chunks[0].raw[i].fileSize == 0:
-      echo i
-      break
+  var i = 0
+  for entry in db.archiveDb.fileDb.iterAllFileEntries():
+    inc i
+  echo i
 
   db.save()
 
