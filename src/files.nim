@@ -369,9 +369,6 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     storedSalt = generateSalt()
     rawChunks.raw.add(create(array[dbSize, FileEntry]))
 
-    for i in 0 ..< dbSize - 2:
-      rawChunks.raw[0][i].fileSize = 1
-
   else:
     if not verifyPassword(storedPwHash, password):
       raiseAssert "Wrong password"
