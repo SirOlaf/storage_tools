@@ -23,13 +23,13 @@ const
 
 const
   shiftIsInSmallBlock = 15
-  maskIsInSmallBlock = 1 shl shiftIsInSmallBlock
+  maskIsInSmallBlock: uint16 = 1 shl shiftIsInSmallBlock
 
   shiftIsCompressed = 14
-  maskIsCompressed = 1 shl shiftIsCompressed
+  maskIsCompressed: uint16 = 1 shl shiftIsCompressed
 
   shiftBlockOffset = 11
-  maskBlockOffset = (1 shl (shiftBlockOffset + 1)) - 1
+  maskBlockOffset: uint16 = (1 shl (shiftBlockOffset + 1)) - 1
 
 
 # TODO: Construct a flat hash index to be stored in a file later. Hash -> FileIndex to check for file existence quicker
@@ -86,14 +86,18 @@ proc isInSmallBlock*(entry: FileEntry): bool {.inline.} =
   (entry.internalBlockOffset and maskIsInSmallBlock) != 0
 
 proc `isInSmallBlock=`(entry: var FileEntry, x: bool) {.inline.} =
-  entry.internalBlockOffset = entry.internalBlockOffset or (x.uint16 shl shiftIsInSmallBlock)
+  entry.internalBlockOffset = entry.internalBlockOffset and (not maskIsInSmallBlock)
+  if x:
+    entry.internalBlockOffset = entry.internalBlockOffset or maskIsInSmallBlock
 
 
 proc isCompressed*(entry: FileEntry): bool {.inline.} =
   (entry.internalBlockOffset and maskIsCompressed) != 0
 
 proc `isCompressed=`(entry: var FileEntry, x: bool) {.inline.} =
-  entry.internalBlockOffset = entry.internalBlockOffset or (x.uint16 shl shiftIsCompressed)
+  entry.internalBlockOffset = entry.internalBlockOffset and (not maskIsCompressed)
+  if x:
+    entry.internalBlockOffset = entry.internalBlockOffset or maskIsCompressed
 
 
 proc rawBlockOffset(entry: FileEntry): uint16 {.inline.} =
@@ -101,6 +105,7 @@ proc rawBlockOffset(entry: FileEntry): uint16 {.inline.} =
 
 proc `rawBlockOffset=`(entry: var FileEntry, x: uint16) {.inline.} =
   doAssert (x and maskBlockOffset) == x, $x
+  entry.internalBlockOffset = entry.internalBlockOffset and (not maskBlockOffset)
   entry.internalBlockOffset = entry.internalBlockOffset or (x and maskBlockOffset)
 
 proc blockOffset*(entry: FileEntry): uint16 {.inline.} =
@@ -423,12 +428,8 @@ when isMainModule:
         discard db.insertFile(x)
 
   var totalFiles = 0
-  var i = 0
   for entry in db.iterAllFileEntries():
-    if entry.fileSize == 0:
-      totalFiles = i
-      break
-    inc i
+    inc totalFiles
   #  echo db.entries[i], " ", db.entries[i].isInSmallBlock, " ", db.entries[i].isCompressed, " ", db.entries[i].fileSize.int64.formatSize(), " ", db.entries[i].blockOffset
 
   echo "insert count: ", totalFiles
