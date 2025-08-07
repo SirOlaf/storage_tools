@@ -28,8 +28,8 @@ const
   shiftIsCompressed = 14
   maskIsCompressed: uint16 = 1 shl shiftIsCompressed
 
-  shiftBlockOffset = 11
-  maskBlockOffset: uint16 = (1 shl (shiftBlockOffset + 1)) - 1
+  shiftBlockOffset = 12
+  maskBlockOffset: uint16 = (1 shl shiftBlockOffset) - 1
 
 
 # TODO: Construct a flat hash index to be stored in a file later. Hash -> FileIndex to check for file existence quicker
@@ -44,10 +44,13 @@ type
     blockId*: BlockId # used as a filename, multiple entries can have the same id as long as the offset is different
     crc32*: uint32
     sha256*: array[32, byte]
-    internalFileSize: uint32 # may be extended by blockOffset
-    internalBlockOffset: uint16 # only need 11 bits for storage, offset into a block of size smallBlockSize otherwise 0
-      # mask 1 << 15: isInSmallBlock, if 0, 11 lsb are used as the lsb for fileSize
+    internalFileSize: uint32 # may be extended by blockOffset for a total of 44 bits after extension
+    internalBlockOffset: uint16 # only need 12 bits for storage, offset into a block of size smallBlockSize otherwise 0
+      # mask 1 << 15: isInSmallBlock, if 0, 12 lsb are used as the lsb for fileSize
       # mask 1 << 14: isCompressed
+      # mask 1 << 13: reserved
+      # mask 1 << 12: reserved
+      # bits 11 to 0: For small files an offset into a block, otherwise used to extend internalFileSize to 44 bits.
 
   SmallFileInfo = object
     sourcePath: string
