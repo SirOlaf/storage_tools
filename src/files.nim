@@ -74,7 +74,7 @@ type
     pwHash: PwHash
 
 
-doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
+static: doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
 
 
 proc `=destroy`(db: FileDb) =
@@ -334,7 +334,7 @@ proc commit*(db: var FileDb) =
         copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
 
       db[info.index].rawBlockOffset = pageOffset.uint16
-      inc pageOffset, db[info.index].fileSize
+      inc pageOffset, db[info.index].fileSize()
 
     let assignedBlockId = db.submitFileToStore(page.toOpenArray(page.low, pageOffset.int - 1))
     for info in bucket[1]:
