@@ -401,6 +401,7 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     result.knownHashes.incl(entry.sha256)
 
 proc save*(db: var FileDb) =
+  doAssert db.smallFileQueue.len() == 0
   db.store.save(some db.dbPath)
   for i in 0 ..< db.rawChunks.raw.len():
     let buffSize = sizeof(array[dbSize, FileEntry]) + (if i == 0: saltSize + pwHashSize else: 0)
