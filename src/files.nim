@@ -281,12 +281,12 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
     crc32 : crc32,
     sha256 : sha256,
   )
-  entry.isInSmallBlock = relevantSize.uint < smallBlockSize() div 2
+  entry.isInSmallBlock = relevantSize.uint < smallBlockSize()
   entry.fileSize = relevantSize.uint
   entry.isCompressed = shouldCompress
   result = db.advanceFileIndex()
 
-  if relevantSize.uint < smallBlockSize() div 2:
+  if relevantSize.uint < smallBlockSize():
     db.smallFileQueue.add(SmallFileInfo(
       sourcePath : filePath,
       index : result,
@@ -305,30 +305,30 @@ proc insertFile*(db: var FileDb, filePath: string): FileIndex =
 
 proc commit*(db: var FileDb) =
   var
-    bucket = (0u64, newSeq[SmallFileInfo]())
-    filledBuckets = newSeq[(uint64, seq[SmallFileInfo])]()
-    smallFiles = db.smallFileQueue.sortedByIt(it.finalSize)
+    openBuckets = newSeq[(uint64, seq[SmallFileInfo])]() # (usedSpace, files)
+    smallFilesAsc = db.smallFileQueue.sortedByIt(it.finalSize)
 
-  for i in 0 ..< smallFiles.len():
-    if smallFiles[i].finalSize > smallBlockSize() div 2:
-      raiseAssert "Invalid file size during commit"
-    let spaceLeft = smallBlockSize() - bucket[0]
-    if spaceLeft.uint64 >= smallFiles[i].finalSize:
-      bucket[0] += smallFiles[i].finalSize
-      bucket[1].add(smallFiles[i])
-    else:
-      filledBuckets.add(bucket)
-      bucket = (smallFiles[i].finalSize, @[smallFiles[i]])
-  if bucket[0] != 0:
-    filledBuckets.add(bucket)
+  # distribute files in descending order by size
+  for i in countdown(smallFilesAsc.high(), 0):
+    var placed = false
+    for j in 0 ..< openBuckets.len():
+      let spaceLeft = smallBlockSize() - openBuckets[j][0]
+      if spaceLeft >= smallFilesAsc[i].finalSize:
+        openBuckets[j][0] += smallFilesAsc[i].finalSize
+        openBuckets[j][1].add(smallFilesAsc[i])
+        placed = true
+        break
+    if not placed:
+      openBuckets.add((smallFilesAsc[i].finalSize, @[smallFilesAsc[i]]))
 
-  for bucket in filledBuckets:
+  for bucket in openBuckets:
     var page = newSeq[byte](smallBlockSize())
     var pageOffset = 0u64
     for info in bucket[1]:
       let sourceData = readFile(info.sourcePath)
       if db[info.index].isCompressed:
         let outData = compress(sourceData.toOpenArrayByte(sourceData.low, sourceData.high))
+        doAssert outData.len().uint64 == db[info.index].fileSize()
         copyMem(addr page[pageOffset], addr outData[0], outData.len())
       else:
         copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
