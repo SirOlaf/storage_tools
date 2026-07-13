@@ -144,7 +144,7 @@ proc secretstreamOverhead*(): uint = crypto_secretstream_xchacha20poly1305_ABYTE
 
 proc encryptDataInto*(masterKey: MasterKey, id: SubkeyId, data: openArray[byte], dest: openArray[byte]) =
   if data.len() == 0:
-    return
+    raise newException(ValueError, "Invalid data size")
   let key = masterKey.deriveSubkey(id)
   var
     state = default(crypto_secretstream_xchacha20poly1305_state)
