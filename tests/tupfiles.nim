@@ -81,3 +81,9 @@ suite "upfiles":
 
     check x.atEof()
 
+  test "string-backed slices survive owner moves":
+    var source = "short string"
+    let slice = source.toSlice()
+    let movedSource = move(source)
+
+    check $slice == movedSource

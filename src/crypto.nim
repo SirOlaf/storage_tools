@@ -34,8 +34,9 @@ template asArray*(self: CryptoKey): array[keySize, byte] =
   cast[ptr array[keySize, byte]](addr self)[]
 
 proc `$`*(self: CryptoKey): string =
-  var buf = newString(keySize)
-  copyMem(addr buf[0], addr self.asArray()[0], keySize)
+  var buf: string
+  copyMem(beginStore(buf, keySize), addr self.asArray()[0], keySize)
+  endStore(buf)
   buf.toHex()
 
 
@@ -49,14 +50,16 @@ template asCsArray*(self: PwHash): array[pwHashSize, cschar] =
   cast[ptr array[pwhashSize, cschar]](addr self)[]
 
 proc `$`*(self: PwHash): string =
-  var buf = newString(pwHashSize)
-  copyMem(addr buf[0], addr self.asArray()[0], pwHashSize)
+  var buf: string
+  copyMem(beginStore(buf, pwHashSize), addr self.asArray()[0], pwHashSize)
+  endStore(buf)
   buf.toHex()
 
 
 proc generateSalt*(): Salt =
-  var salt = newString(saltSize)
-  randombytes_buf(addr salt[0], salt.len().csize_t)
+  var salt: string
+  randombytes_buf(beginStore(salt, saltSize), saltSize.csize_t)
+  endStore(salt)
   salt.Salt
 
 template checkPwLen(password: string): untyped =
@@ -66,7 +69,7 @@ template checkPwLen(password: string): untyped =
 proc fromString*(t: typedesc[PwHash], str: string): PwHash =
   doAssert str.len() == pwHashSize
   result = default(PwHash)
-  copyMem(addr result.asArray()[0], addr str[0], pwHashSize)
+  copyMem(addr result.asArray()[0], readRawData(str), pwHashSize)
 
 proc hashPassword*(password: string): PwHash =
   checkPwLen(password)
@@ -90,7 +93,7 @@ proc deriveMasterKey*(password: string, salt: Salt): MasterKey =
     keySize,
     password.cstring,
     password.len().culonglong,
-    cast[ptr byte](addr salt.string[0]),
+    cast[ptr byte](readRawData(salt.string)),
     crypto_pwhash_opslimit_moderate_proc(),
     crypto_pwhash_memlimit_moderate_proc(),
     crypto_pwhash_alg_argon2id13_proc()

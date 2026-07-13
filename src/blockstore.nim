@@ -88,7 +88,7 @@ proc takeHashEntry(p: var StrSlice): HashEntry =
       p.expectChar(';')
     of "sha":
       let buff = p.takeString().parseHexStr()
-      copyMem(addr result.sha256[0], addr buff[0], result.sha256.len())
+      copyMem(addr result.sha256[0], readRawData(buff), result.sha256.len())
       p.expectChar(';')
     else:
       raiseAssert "Unexpected low field: " & fieldName

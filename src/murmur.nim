@@ -43,3 +43,6 @@ proc murmur2impl(data: ptr UncheckedArray[byte], len: uint32): HashMurmur2 =
 
 proc murmur2*(data: openArray[char]): HashMurmur2 {.inline.} =
   murmur2impl(cast[ptr UncheckedArray[byte]](addr data[0]), data.len().uint32)
+
+proc murmur2*(data: string): HashMurmur2 {.inline.} =
+  murmur2impl(cast[ptr UncheckedArray[byte]](readRawData(data)), data.len().uint32)

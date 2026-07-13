@@ -331,7 +331,7 @@ proc commit*(db: var FileDb) =
         doAssert outData.len().uint64 == db[info.index].fileSize()
         copyMem(addr page[pageOffset], addr outData[0], outData.len())
       else:
-        copyMem(addr page[pageOffset], addr sourceData[0], sourceData.len())
+        copyMem(addr page[pageOffset], readRawData(sourceData), sourceData.len())
 
       db[info.index].rawBlockOffset = pageOffset.uint16
       inc pageOffset, db[info.index].fileSize()
@@ -359,7 +359,6 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     rawChunks = default(RawChunks)
     storedSalt = default(Salt)
     storedPwHash = default(PwHash)
-  storedSalt.string.setLen(saltSize)
   for path in walkPattern(dbPath.joinPath("*.filedb")):
     let num = path.splitFile.name.parseInt()
     let i = num - 1 # nums start at 1
@@ -369,7 +368,8 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     copyMem(buff, addr filedbFileData[0], sizeof(array[dbSize, FileEntry]))
     rawChunks.raw[i] = buff
     if i == 0:
-      copyMem(addr storedSalt.string[0], addr filedbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
+      copyMem(beginStore(storedSalt.string, saltSize), addr filedbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
+      endStore(storedSalt.string)
       copyMem(addr storedPwHash.asArray()[0], addr filedbFileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
 
   if rawChunks.raw.len() == 0:
@@ -405,11 +405,13 @@ proc save*(db: var FileDb) =
   db.store.save(some db.dbPath)
   for i in 0 ..< db.rawChunks.raw.len():
     let buffSize = sizeof(array[dbSize, FileEntry]) + (if i == 0: saltSize + pwHashSize else: 0)
-    var outBuff = newString(buffSize)
-    copyMem(addr outBuff[0], db.rawChunks.raw[i], sizeof(array[dbSize, FileEntry]))
+    var outBuff: string
+    let outBuffData = beginStore(outBuff, buffSize)
+    copyMem(outBuffData, db.rawChunks.raw[i], sizeof(array[dbSize, FileEntry]))
     if i == 0:
-      copyMem(addr outBuff[sizeof(array[dbSize, FileEntry])], addr db.salt.string[0], saltSize)
-      copyMem(addr outBuff[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
+      copyMem(addr outBuffData[sizeof(array[dbSize, FileEntry])], readRawData(db.salt.string), saltSize)
+      copyMem(addr outBuffData[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
+    endStore(outBuff)
     writeFile(joinPath(db.dbPath, $(i + 1) & filedbExt), compress(outBuff))
 
 

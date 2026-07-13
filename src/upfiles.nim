@@ -20,8 +20,8 @@ proc len*(x: StrSlice): int {.inline.} =
   cast[int](x.z) - cast[int](x.p)
 
 proc `$`*(x: StrSlice): string =
-  result = newString(x.len)
-  copyMem(addr result[0], x.p, x.len)
+  copyMem(beginStore(result, x.len), x.p, x.len)
+  endStore(result)
 
 proc inc*(x: var StrSlice) {.inline.} =
   x.p = cast[ptr UncheckedArray[char]](addr x.p[1])
@@ -35,6 +35,10 @@ proc toSlice*(buff: ptr UncheckedArray[char], len: int): StrSlice {.inline.} =
 
 proc toSlice*(buff: openArray[char]): StrSlice {.inline.} =
   toSlice(cast[ptr UncheckedArray[char]](addr buff[0]), buff.len())
+
+proc toSlice*(buff: var string): StrSlice {.inline.} =
+  # StrSlice keeps the pointer, so make SSO strings use stable storage
+  toSlice(readRawDataStable(buff), buff.len())
 
 
 # TODO: Don't manually define escape sequences
