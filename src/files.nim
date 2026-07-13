@@ -20,6 +20,8 @@ const
   dbSize* = 1_000_000 # 1 million entries per database
   internalSmallBlockSize = 4096
   filedbExt = ".filedb"
+  kdfMetadataMagic = ['S', 'T', 'K', 'D', 'F', 'C', 'F', 'G']
+  kdfMetadataVersion = 1'u16
 
 const
   shiftIsInSmallBlock = 15
@@ -58,6 +60,10 @@ type
     finalSize: uint64
 
   FileEntryArray = array[dbSize, FileEntry]
+  StoredKdfMetadata {.packed.} = object
+    magic: array[8, char]
+    version: uint16
+    params: KdfParams
   RawChunks = object
     raw: seq[ptr FileEntryArray]
   FileDb* = object
@@ -72,9 +78,40 @@ type
     # salt and password hash are appended to the end of the first chunk
     salt: Salt
     pwHash: PwHash
+    kdfParams: KdfParams
 
 
 static: doAssert sizeof(FileEntry) == 54, "was " & $(sizeof(FileEntry))
+static: doAssert sizeof(KdfParams) == 20, "was " & $(sizeof(KdfParams))
+static: doAssert sizeof(StoredKdfMetadata) == 30, "was " & $(sizeof(StoredKdfMetadata))
+static: doAssert sizeof(cint) == sizeof(int32)
+
+const
+  firstChunkSaltOffset = sizeof(FileEntryArray)
+  firstChunkPwHashOffset = firstChunkSaltOffset + saltSize
+  firstChunkKdfMetadataOffset = firstChunkPwHashOffset + pwHashSize
+  firstChunkSize = firstChunkKdfMetadataOffset + sizeof(StoredKdfMetadata)
+
+
+proc toStoredMetadata(params: KdfParams): StoredKdfMetadata =
+  StoredKdfMetadata(
+    magic: kdfMetadataMagic,
+    version: kdfMetadataVersion,
+    params: params,
+  )
+
+proc readKdfParams(data: openArray[byte], offset: int): Option[KdfParams] =
+  if data.len() < offset + sizeof(StoredKdfMetadata):
+    return none(KdfParams)
+
+  var stored = default(StoredKdfMetadata)
+  copyMem(addr stored, unsafeAddr data[offset], sizeof(stored))
+  if stored.magic != kdfMetadataMagic:
+    return none(KdfParams)
+  if stored.version != kdfMetadataVersion:
+    raise newException(ValueError, "Unsupported KDF metadata version: " & $stored.version)
+
+  some(stored.params)
 
 
 proc `=destroy`(db: FileDb) =
@@ -359,23 +396,30 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     rawChunks = default(RawChunks)
     storedSalt = default(Salt)
     storedPwHash = default(PwHash)
+    storedKdfParams = legacyKdfParams()
   for path in walkPattern(dbPath.joinPath("*.filedb")):
     let num = path.splitFile.name.parseInt()
     let i = num - 1 # nums start at 1
     if num > rawChunks.raw.len(): rawChunks.raw.setLen(num)
     let filedbFileData = decompress(readFile(path))
-    var buff = create(array[dbSize, FileEntry])
-    copyMem(buff, addr filedbFileData[0], sizeof(array[dbSize, FileEntry]))
+    var buff = create(FileEntryArray)
+    copyMem(buff, addr filedbFileData[0], sizeof(FileEntryArray))
     rawChunks.raw[i] = buff
     if i == 0:
-      copyMem(beginStore(storedSalt.string, saltSize), addr filedbFileData[sizeof(array[dbSize, FileEntry])], saltSize)
+      if filedbFileData.len() < firstChunkKdfMetadataOffset:
+        raise newException(ValueError, "First database chunk is missing its salt or password hash")
+      copyMem(beginStore(storedSalt.string, saltSize), addr filedbFileData[firstChunkSaltOffset], saltSize)
       endStore(storedSalt.string)
-      copyMem(addr storedPwHash.asArray()[0], addr filedbFileData[sizeof(array[dbSize, FileEntry]) + saltSize], pwHashSize)
+      copyMem(addr storedPwHash.asArray()[0], addr filedbFileData[firstChunkPwHashOffset], pwHashSize)
+      let persistedKdfParams = filedbFileData.readKdfParams(firstChunkKdfMetadataOffset)
+      if persistedKdfParams.isSome():
+        storedKdfParams = persistedKdfParams.unsafeGet()
 
   if rawChunks.raw.len() == 0:
     storedPwHash = pwHash
     storedSalt = generateSalt()
-    rawChunks.raw.add(create(array[dbSize, FileEntry]))
+    storedKdfParams = recommendedKdfParams()
+    rawChunks.raw.add(create(FileEntryArray))
 
   else:
     if not verifyPassword(storedPwHash, password):
@@ -387,11 +431,12 @@ proc openFileDb*(dbPath: string, storePath: string, password: string): FileDb =
     ),
     rawChunks : ensureMove rawChunks,
     dbPath : dbPath,
-    masterKey : deriveMasterKey(password, storedSalt),
+    masterKey : deriveMasterKey(password, storedSalt, storedKdfParams),
     knownCrcs : initHashSet[uint32](),
     knownHashes : initHashSet[array[32, byte]](),
     salt : storedSalt,
     pwHash : storedPwHash,
+    kdfParams : storedKdfParams,
   )
   result.store.nextBlockId = result.searchNextBlockId()
   result.nextEntryIndex = result.rawChunks.searchTailIndex()
@@ -404,13 +449,15 @@ proc save*(db: var FileDb) =
   doAssert db.smallFileQueue.len() == 0
   db.store.save(some db.dbPath)
   for i in 0 ..< db.rawChunks.raw.len():
-    let buffSize = sizeof(array[dbSize, FileEntry]) + (if i == 0: saltSize + pwHashSize else: 0)
+    let buffSize = if i == 0: firstChunkSize else: sizeof(FileEntryArray)
     var outBuff: string
     let outBuffData = beginStore(outBuff, buffSize)
-    copyMem(outBuffData, db.rawChunks.raw[i], sizeof(array[dbSize, FileEntry]))
+    copyMem(outBuffData, db.rawChunks.raw[i], sizeof(FileEntryArray))
     if i == 0:
-      copyMem(addr outBuffData[sizeof(array[dbSize, FileEntry])], readRawData(db.salt.string), saltSize)
-      copyMem(addr outBuffData[sizeof(array[dbSize, FileEntry]) + saltSize], addr db.pwHash.asArray()[0], pwHashSize)
+      var storedKdfMetadata = db.kdfParams.toStoredMetadata()
+      copyMem(addr outBuffData[firstChunkSaltOffset], readRawData(db.salt.string), saltSize)
+      copyMem(addr outBuffData[firstChunkPwHashOffset], addr db.pwHash.asArray()[0], pwHashSize)
+      copyMem(addr outBuffData[firstChunkKdfMetadataOffset], addr storedKdfMetadata, sizeof(storedKdfMetadata))
     endStore(outBuff)
     writeFile(joinPath(db.dbPath, $(i + 1) & filedbExt), compress(outBuff))
 

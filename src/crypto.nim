@@ -13,6 +13,12 @@ const
   pwHashSize* = 128
   cryptoCtxName = ['F', 'i', 'l', 'e', 't', 'o', 'o', 'l']
 
+  # Databases created before KDF parameters were stored used libsodium's
+  # Argon2id "moderate" profile. Keep those values pinned for compatibility.
+  legacyKdfAlgorithm = 2'i32
+  legacyKdfOpsLimit = 3'u64
+  legacyKdfMemLimit = 256'u64 * 1024 * 1024
+
 static:
   doAssert cryptoCtxName.len() == 8
   doAssert crypto_pwhash_STRBYTES == pwHashSize
@@ -25,6 +31,11 @@ type
   SubkeyId* = distinct uint64
 
   PwHash* = distinct array[pwHashSize, byte]
+
+  KdfParams* {.packed.} = object
+    algorithm*: int32
+    opsLimit*: uint64
+    memLimit*: uint64
 
 proc `$`*(self: Salt): string =
   self.string.toHex()
@@ -85,8 +96,23 @@ proc hashPassword*(password: string): PwHash =
 proc verifyPassword*(pwHash: PwHash, password: string): bool =
   crypto_pwhash_str_verify(pwHash.asCsArray(), password.cstring, password.len().culonglong) == 0
 
-proc deriveMasterKey*(password: string, salt: Salt): MasterKey =
+proc legacyKdfParams*(): KdfParams =
+  KdfParams(
+    algorithm: legacyKdfAlgorithm,
+    opsLimit: legacyKdfOpsLimit,
+    memLimit: legacyKdfMemLimit,
+  )
+
+proc recommendedKdfParams*(): KdfParams =
+  KdfParams(
+    algorithm: crypto_pwhash_alg_argon2id13_proc().int32,
+    opsLimit: crypto_pwhash_opslimit_moderate_proc().uint64,
+    memLimit: crypto_pwhash_memlimit_moderate_proc().uint64,
+  )
+
+proc deriveMasterKey*(password: string, salt: Salt, params: KdfParams): MasterKey =
   checkPwLen(password)
+  doAssert params.memLimit <= high(csize_t).uint64
   result = default(MasterKey)
   doAssert crypto_pwhash(
     cast[ptr byte](addr result.asArray()[0]),
@@ -94,10 +120,13 @@ proc deriveMasterKey*(password: string, salt: Salt): MasterKey =
     password.cstring,
     password.len().culonglong,
     cast[ptr byte](readRawData(salt.string)),
-    crypto_pwhash_opslimit_moderate_proc(),
-    crypto_pwhash_memlimit_moderate_proc(),
-    crypto_pwhash_alg_argon2id13_proc()
+    params.opsLimit.culonglong,
+    params.memLimit.csize_t,
+    params.algorithm.cint,
   ) == 0
+
+proc deriveMasterKey*(password: string, salt: Salt): MasterKey =
+  password.deriveMasterKey(salt, recommendedKdfParams())
 
 proc deriveSubkey*(key: MasterKey, id: SubkeyId): CryptoKey =
   assert id.int > 0
