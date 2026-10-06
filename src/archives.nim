@@ -10,6 +10,7 @@ import std/[
   algorithm,
 ]
 
+import applemeta
 import files
 import upfiles
 import murmur
@@ -185,9 +186,19 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
   var knownDirs = newTable[string, DirIndex]()
   var dirs = newSeq[ArchiveDirPath]()
   var intervals = initDoublyLinkedList[tuple[a, b: FileIndex; paths: DoublyLinkedList[ArchiveFilePath]]]()
+  # Apple metadata is dropped here so it never reaches the file store or the structure hash
+  var metadataDirs = newSeq[string]()
+  template inMetadataDir(p: string): bool =
+    metadataDirs.anyIt(p.startsWith(it & "/"))
   db.fileDb.transaction:
     for dirPath in walkDirRec(folderPath, yieldFilter={pcDir}, relative=true, skipSpecial=true):
       let dirPath = dirPath.split(PathSep).join("/").normalizedPath()
+      # Parents are yielded before their children
+      if dirPath.inMetadataDir():
+        continue
+      if isAppleMetadataDir(folderPath.joinPath(dirPath)):
+        metadataDirs.add(dirPath)
+        continue
       doAssert dirPath notin knownDirs
       knownDirs[dirPath] = 0
       dirs.add((dirPath, getFilePermissions(folderPath.joinPath(dirPath))))
@@ -201,6 +212,8 @@ proc insertArchive*(db: var Archivedb, folderPath: string): ArchiveIndex =
         filePath = filePath.split(PathSep).join("/").normalizedPath()
         fileName = filePath.extractFilename()
         fileDir = if "/" in filePath: filePath.parentDir() else: ""
+      if filePath.inMetadataDir() or isAppleMetadataFile(folderPath.joinPath(filePath)):
+        continue
       let perms = getFilePermissions(folderPath.joinPath(filePath))
       if getFileSize(folderPath.joinPath(filePath)) == 0:
         archive.emptyFiles.add((fileName, fileDir.dirPathToIdx(), perms))
